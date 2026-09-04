@@ -82,61 +82,96 @@ jobs:
           
           echo "🔧 Adapting untuk Flutter $FLUTTER_MAJOR.$FLUTTER_MINOR, Dart $DART_MAJOR"
 
-          # ── 1. Gradle wrapper ──────────────────────────────────────────────
+          # ── 1. Gradle wrapper (UPGRADE KE VERSI TERBARU) ──────────────────
           WRAPPER="$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
           if [ -f "$WRAPPER" ]; then
-            if [ "$FLUTTER_MAJOR" -ge 3 ]; then
-              GRADLE_VER="8.7"
+            # Deteksi apakah pakai Kotlin DSL (.kts) atau Groovy (.gradle)
+            if [ -f "$ANDROID_DIR/app/build.gradle.kts" ]; then
+              # Kotlin DSL butuh Gradle 8.11.1+
+              GRADLE_VER="8.11.1"
+              echo "🔍 Detected Kotlin DSL → Gradle $GRADLE_VER"
             else
-              GRADLE_VER="7.6.3"
+              # Groovy DSL, sesuaikan dengan versi Flutter
+              if [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 22 ]; then
+                GRADLE_VER="8.7"
+              elif [ "$FLUTTER_MAJOR" -ge 3 ]; then
+                GRADLE_VER="8.6"
+              else
+                GRADLE_VER="7.6.3"
+              fi
+              echo "🔍 Detected Groovy DSL → Gradle $GRADLE_VER"
             fi
+            
             sed -i "s|gradle-[0-9][0-9.]*-[a-z]*\.zip|gradle-${GRADLE_VER}-bin.zip|g" "$WRAPPER"
             echo "[OK] Gradle wrapper → $GRADLE_VER"
           fi
 
           # ── 2. AGP & Kotlin ──────────────────────────────────────────────────
-          ROOT_GRADLE="$ANDROID_DIR/build.gradle"
-          if [ -f "$ROOT_GRADLE" ]; then
-            if [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 22 ]; then
-              AGP_VER="8.3.2"
-              KOTLIN_VER="1.9.24"
-            elif [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 16 ]; then
-              AGP_VER="8.1.4"
-              KOTLIN_VER="1.9.10"
-            elif [ "$FLUTTER_MAJOR" -ge 3 ]; then
-              AGP_VER="7.4.2"
-              KOTLIN_VER="1.8.22"
-            else
-              AGP_VER="4.2.2"
-              KOTLIN_VER="1.7.10"
+          # Cek apakah pakai Kotlin DSL
+          if [ -f "$ANDROID_DIR/app/build.gradle.kts" ]; then
+            # Kotlin DSL - update di build.gradle.kts
+            APP_GRADLE="$ANDROID_DIR/app/build.gradle.kts"
+            ROOT_GRADLE="$ANDROID_DIR/build.gradle.kts"
+            
+            if [ -f "$ROOT_GRADLE" ]; then
+              # Update AGP di build.gradle.kts
+              sed -i 's/id("com.android.application") version "[^"]*"/id("com.android.application") version "8.7.2"/g' "$ROOT_GRADLE"
+              sed -i 's/id("org.jetbrains.kotlin.android") version "[^"]*"/id("org.jetbrains.kotlin.android") version "2.0.20"/g' "$ROOT_GRADLE"
+              echo "[OK] AGP → 8.7.2, Kotlin → 2.0.20 (Kotlin DSL)"
             fi
             
-            sed -i "s/com\.android\.tools\.build:gradle:[0-9][0-9.]*/com.android.tools.build:gradle:${AGP_VER}/g" "$ROOT_GRADLE"
-            sed -i "s/kotlin_version\s*=\s*['\"][0-9][0-9.]*['\"]/kotlin_version = '${KOTLIN_VER}'/g" "$ROOT_GRADLE"
-            sed -i "s/org\.jetbrains\.kotlin:kotlin-gradle-plugin:[0-9][0-9.]*/org.jetbrains.kotlin:kotlin-gradle-plugin:${KOTLIN_VER}/g" "$ROOT_GRADLE"
-            echo "[OK] AGP → $AGP_VER, Kotlin → $KOTLIN_VER"
-          fi
-
-          # ── 3. compileSdk ──────────────────────────────────────────────────
-          APP_GRADLE="$ANDROID_DIR/app/build.gradle"
-          if [ -f "$APP_GRADLE" ]; then
-            if [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 22 ]; then
-              TARGET_SDK=35
-              JAVA_VER="17"
-            elif [ "$FLUTTER_MAJOR" -ge 3 ]; then
-              TARGET_SDK=34
-              JAVA_VER="17"
-            else
-              TARGET_SDK=33
-              JAVA_VER="11"
+            if [ -f "$APP_GRADLE" ]; then
+              # Update compileSdk di Kotlin DSL
+              sed -i 's/compileSdk = [0-9]\+/compileSdk = 35/g' "$APP_GRADLE"
+              sed -i 's/targetSdk = [0-9]\+/targetSdk = 35/g' "$APP_GRADLE"
+              sed -i 's/minSdk = [0-9]\+/minSdk = 21/g' "$APP_GRADLE"
+              echo "[OK] compileSdk → 35, targetSdk → 35, minSdk → 21"
+            fi
+          else
+            # Groovy DSL - update di build.gradle
+            ROOT_GRADLE="$ANDROID_DIR/build.gradle"
+            if [ -f "$ROOT_GRADLE" ]; then
+              if [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 22 ]; then
+                AGP_VER="8.3.2"
+                KOTLIN_VER="1.9.24"
+              elif [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 16 ]; then
+                AGP_VER="8.1.4"
+                KOTLIN_VER="1.9.10"
+              elif [ "$FLUTTER_MAJOR" -ge 3 ]; then
+                AGP_VER="7.4.2"
+                KOTLIN_VER="1.8.22"
+              else
+                AGP_VER="4.2.2"
+                KOTLIN_VER="1.7.10"
+              fi
+              
+              sed -i "s/com\.android\.tools\.build:gradle:[0-9][0-9.]*/com.android.tools.build:gradle:${AGP_VER}/g" "$ROOT_GRADLE"
+              sed -i "s/kotlin_version\s*=\s*['\"][0-9][0-9.]*['\"]/kotlin_version = '${KOTLIN_VER}'/g" "$ROOT_GRADLE"
+              sed -i "s/org\.jetbrains\.kotlin:kotlin-gradle-plugin:[0-9][0-9.]*/org.jetbrains.kotlin:kotlin-gradle-plugin:${KOTLIN_VER}/g" "$ROOT_GRADLE"
+              echo "[OK] AGP → $AGP_VER, Kotlin → $KOTLIN_VER (Groovy DSL)"
             fi
             
-            sed -i "s/compileSdkVersion\s\+[0-9]\+/compileSdkVersion $TARGET_SDK/g" "$APP_GRADLE"
-            sed -i "s/compileSdk\s\+[0-9]\+/compileSdk $TARGET_SDK/g" "$APP_GRADLE"
-            sed -i "s/targetSdkVersion\s\+[0-9]\+/targetSdkVersion $TARGET_SDK/g" "$APP_GRADLE"
-            sed -i "s/targetSdk\s\+[0-9]\+/targetSdk $TARGET_SDK/g" "$APP_GRADLE"
-            sed -i "s/JavaVersion\.VERSION_[0-9]\+/JavaVersion.VERSION_${JAVA_VER}/g" "$APP_GRADLE"
-            echo "[OK] compileSdk → $TARGET_SDK, Java → $JAVA_VER"
+            # ── 3. compileSdk (Groovy) ──────────────────────────────────────
+            APP_GRADLE="$ANDROID_DIR/app/build.gradle"
+            if [ -f "$APP_GRADLE" ]; then
+              if [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 22 ]; then
+                TARGET_SDK=35
+                JAVA_VER="17"
+              elif [ "$FLUTTER_MAJOR" -ge 3 ]; then
+                TARGET_SDK=34
+                JAVA_VER="17"
+              else
+                TARGET_SDK=33
+                JAVA_VER="11"
+              fi
+              
+              sed -i "s/compileSdkVersion\s\+[0-9]\+/compileSdkVersion $TARGET_SDK/g" "$APP_GRADLE"
+              sed -i "s/compileSdk\s\+[0-9]\+/compileSdk $TARGET_SDK/g" "$APP_GRADLE"
+              sed -i "s/targetSdkVersion\s\+[0-9]\+/targetSdkVersion $TARGET_SDK/g" "$APP_GRADLE"
+              sed -i "s/targetSdk\s\+[0-9]\+/targetSdk $TARGET_SDK/g" "$APP_GRADLE"
+              sed -i "s/JavaVersion\.VERSION_[0-9]\+/JavaVersion.VERSION_${JAVA_VER}/g" "$APP_GRADLE"
+              echo "[OK] compileSdk → $TARGET_SDK, Java → $JAVA_VER"
+            fi
           fi
 
       # ── PUBSPEC: Auto-adjust Dart SDK constraint ───────────────────────────
@@ -251,6 +286,13 @@ jobs:
         if: steps.parse.outputs.mode == 'zip'
         working-directory: ${{ steps.root_zip.outputs.dir }}
         run: |
+          # Deteksi apakah pakai Kotlin DSL
+          if [ -f "android/app/build.gradle.kts" ]; then
+            echo "🔍 Kotlin DSL detected - using Gradle 8.11.1"
+            # Update gradle-wrapper.properties jika belum
+            sed -i 's|gradle-[0-9][0-9.]*-[a-z]*\.zip|gradle-8.11.1-bin.zip|g' android/gradle/wrapper/gradle-wrapper.properties
+          fi
+          
           if [ "${{ steps.versions.outputs.flutter_major }}" -ge 3 ]; then
             flutter build apk --${{ steps.parse.outputs.build_type }} --no-tree-shake-icons
           else

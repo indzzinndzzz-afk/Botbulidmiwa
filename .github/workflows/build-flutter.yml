@@ -26,22 +26,21 @@ jobs:
           echo "icon_url=$(jq -r '.iconUrl // ""' payload.json)"       >> $GITHUB_OUTPUT
           echo "flutter_version=$(jq -r '.flutterVersion // "stable"' payload.json)" >> $GITHUB_OUTPUT
 
-      # ── 2. Setup Java (versi fleksibel) ──────────────────────────────────────
+      # ── 2. Setup Java ──────────────────────────────────────────────────────
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: |
-            ${{ contains(github.event.inputs.payload, 'javaVersion') && fromJson(github.event.inputs.payload).javaVersion || '17' }}
+          java-version: '17'
 
-      # ── 3. Setup Flutter (support semua versi) ──────────────────────────────
+      # ── 3. Setup Flutter ──────────────────────────────────────────────────
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: ${{ steps.parse.outputs.flutter_version }}
           cache: true
 
-      # ── 4. Deteksi versi Flutter & Dart ──────────────────────────────────────
+      # ── 4. Deteksi versi Flutter & Dart ──────────────────────────────────
       - name: Detect Flutter/Dart versions
         id: versions
         run: |
@@ -83,10 +82,9 @@ jobs:
           
           echo "🔧 Adapting untuk Flutter $FLUTTER_MAJOR.$FLUTTER_MINOR, Dart $DART_MAJOR"
 
-          # ── 1. Gradle wrapper (sesuai versi Flutter) ──────────────────────────
+          # ── 1. Gradle wrapper ──────────────────────────────────────────────
           WRAPPER="$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
           if [ -f "$WRAPPER" ]; then
-            # Flutter 3.x → Gradle 8.x
             if [ "$FLUTTER_MAJOR" -ge 3 ]; then
               GRADLE_VER="8.7"
             else
@@ -96,7 +94,7 @@ jobs:
             echo "[OK] Gradle wrapper → $GRADLE_VER"
           fi
 
-          # ── 2. AGP & Kotlin (sesuai versi) ──────────────────────────────────
+          # ── 2. AGP & Kotlin ──────────────────────────────────────────────────
           ROOT_GRADLE="$ANDROID_DIR/build.gradle"
           if [ -f "$ROOT_GRADLE" ]; then
             if [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 22 ]; then
@@ -119,10 +117,9 @@ jobs:
             echo "[OK] AGP → $AGP_VER, Kotlin → $KOTLIN_VER"
           fi
 
-          # ── 3. compileSdk (adaptif) ──────────────────────────────────────────
+          # ── 3. compileSdk ──────────────────────────────────────────────────
           APP_GRADLE="$ANDROID_DIR/app/build.gradle"
           if [ -f "$APP_GRADLE" ]; then
-            # Deteksi SDK versi
             if [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 22 ]; then
               TARGET_SDK=35
               JAVA_VER="17"
@@ -152,17 +149,14 @@ jobs:
           DART_MINOR=${{ steps.versions.outputs.dart_minor }}
           
           if [ -f "$PUBSPEC" ]; then
-            # Backup
             cp "$PUBSPEC" "$PUBSPEC.bak"
             
-            # Baca constraint saat ini
             CURRENT_LOWER=$(grep -oP "(?<=sdk:\s['\"]>=)[0-9.]+" "$PUBSPEC" | head -1 || echo "0.0.0")
             CURRENT_UPPER=$(grep -oP "(?<=sdk:\s['\"]>=[0-9.]+ <)[0-9.]+" "$PUBSPEC" | head -1 || echo "4.0.0")
             
             echo "📋 Current SDK: >=$CURRENT_LOWER <$CURRENT_UPPER"
             echo "🔧 Dart version: $DART_MAJOR.$DART_MINOR"
             
-            # Auto-adjust lower bound
             LOWER_MAJOR=$(echo $CURRENT_LOWER | cut -d. -f1)
             if [ "$LOWER_MAJOR" -lt "$DART_MAJOR" ]; then
               NEW_LOWER="${DART_MAJOR}.0.0"
@@ -172,7 +166,6 @@ jobs:
               echo "✅ Lower bound sudah OK"
             fi
             
-            # Auto-adjust upper bound (selalu longgar)
             UPPER_MAJOR=$(echo $CURRENT_UPPER | cut -d. -f1)
             if [ "$UPPER_MAJOR" -lt $(($DART_MAJOR + 1)) ]; then
               NEW_UPPER="$(($DART_MAJOR + 1)).0.0"
@@ -182,7 +175,6 @@ jobs:
               echo "✅ Upper bound sudah OK"
             fi
             
-            # Terapkan
             sed -i "s/sdk:\s*['\"]>=[0-9.]*\s*<[0-9.]*['\"]/sdk: '>=$NEW_LOWER <$NEW_UPPER'/g" "$PUBSPEC"
             echo "✅ SDK constraint → >=$NEW_LOWER <$NEW_UPPER"
           fi
@@ -217,22 +209,26 @@ jobs:
           
           # Strategi 3: Tambahkan dependency_overrides otomatis
           echo "⚠️  Masih gagal, tambahkan dependency_overrides otomatis"
-          cat >> "$PUBSPEC" << 'EOF'
-
-dependency_overrides:
-  collection: any
-  meta: any
-  material_color_utilities: any
-  plugin_platform_interface: any
-  flutter_plugin_android_lifecycle: any
-EOF
+          
+          if grep -q "^dependency_overrides:" "pubspec.yaml"; then
+            echo "dependency_overrides sudah ada, skip"
+          else
+            echo "" >> "pubspec.yaml"
+            echo "dependency_overrides:" >> "pubspec.yaml"
+            echo "  collection: any" >> "pubspec.yaml"
+            echo "  meta: any" >> "pubspec.yaml"
+            echo "  material_color_utilities: any" >> "pubspec.yaml"
+            echo "  plugin_platform_interface: any" >> "pubspec.yaml"
+            echo "  flutter_plugin_android_lifecycle: any" >> "pubspec.yaml"
+            echo "✅ dependency_overrides ditambahkan"
+          fi
           
           flutter pub get 2>&1 && {
             echo "✅ pub get dengan overrides sukses!"
             exit 0
           }
           
-          # Strategi 4: Force dengan --offline (pakai cache)
+          # Strategi 4: Force dengan --offline
           echo "⚠️  Coba dengan --offline"
           flutter pub get --offline 2>&1 && {
             echo "✅ pub get --offline sukses!"
@@ -250,11 +246,11 @@ EOF
             exit 1
           }
 
+      # ── BUILD APK ──────────────────────────────────────────────────────────
       - name: "[ZIP] Build APK"
         if: steps.parse.outputs.mode == 'zip'
         working-directory: ${{ steps.root_zip.outputs.dir }}
         run: |
-          # Build dengan flag sesuai versi
           if [ "${{ steps.versions.outputs.flutter_major }}" -ge 3 ]; then
             flutter build apk --${{ steps.parse.outputs.build_type }} --no-tree-shake-icons
           else
@@ -270,7 +266,7 @@ EOF
           retention-days: 1
 
       # ════════════════════════════════════════════════════════════════════════
-      # MODE URL — Web2APK (sama, universal)
+      # MODE URL — Web2APK
       # ════════════════════════════════════════════════════════════════════════
       - name: "[URL] Create Flutter WebView project"
         if: steps.parse.outputs.mode == 'url'
@@ -324,29 +320,35 @@ EOF
           }
           DART
 
-      - name: "[URL] Patch app name & icon"
+      - name: "[URL] Patch app name"
         if: steps.parse.outputs.mode == 'url'
         run: |
           APP="${{ steps.parse.outputs.app_name }}"
           sed -i "s/android:label=\"[^\"]*\"/android:label=\"${APP}\"/" \
             webview_project/android/app/src/main/AndroidManifest.xml
-          
-          if [ -n "${{ steps.parse.outputs.icon_url }}" ]; then
-            wget -q -O icon_raw "${{ steps.parse.outputs.icon_url }}"
-            sudo apt-get install -y imagemagick -q
-            for size in 48 72 96 144 192; do
-              case $size in
-                48)  dir="mipmap-mdpi"    ;;
-                72)  dir="mipmap-hdpi"    ;;
-                96)  dir="mipmap-xhdpi"   ;;
-                144) dir="mipmap-xxhdpi"  ;;
-                192) dir="mipmap-xxxhdpi" ;;
-              esac
-              TARGET="webview_project/android/app/src/main/res/${dir}"
-              mkdir -p "$TARGET"
-              convert icon_raw -resize ${size}x${size} "$TARGET/ic_launcher.png"
-            done
-          fi
+
+      - name: "[URL] Download & apply custom icon"
+        if: steps.parse.outputs.mode == 'url' && steps.parse.outputs.icon_url != ''
+        run: |
+          wget -q -O icon_raw "${{ steps.parse.outputs.icon_url }}"
+          sudo apt-get install -y imagemagick -q
+          for size in 48 72 96 144 192; do
+            case $size in
+              48)  dir="mipmap-mdpi"    ;;
+              72)  dir="mipmap-hdpi"    ;;
+              96)  dir="mipmap-xhdpi"   ;;
+              144) dir="mipmap-xxhdpi"  ;;
+              192) dir="mipmap-xxxhdpi" ;;
+            esac
+            TARGET="webview_project/android/app/src/main/res/${dir}"
+            mkdir -p "$TARGET"
+            convert icon_raw -resize ${size}x${size} "$TARGET/ic_launcher.png"
+          done
+
+      - name: "[URL] Flutter pub get"
+        if: steps.parse.outputs.mode == 'url'
+        working-directory: webview_project
+        run: flutter pub get
 
       - name: "[URL] Build APK"
         if: steps.parse.outputs.mode == 'url'

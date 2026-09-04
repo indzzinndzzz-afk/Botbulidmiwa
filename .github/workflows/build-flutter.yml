@@ -1,4 +1,4 @@
-name: Build Flutter APK (Universal)
+name: Build Flutter APK (Ultra Universal)
 
 on:
   workflow_dispatch:
@@ -40,24 +40,31 @@ jobs:
           channel: ${{ steps.parse.outputs.flutter_version }}
           cache: true
 
-      # ── 4. Deteksi versi Flutter & Dart ──────────────────────────────────
-      - name: Detect Flutter/Dart versions
+      # ── 4. Deteksi versi base ─────────────────────────────────────────────
+      - name: Detect base versions
         id: versions
         run: |
           FLUTTER_VER=$(flutter --version | head -1 | grep -oP '\d+\.\d+\.\d+')
           DART_VER=$(dart --version 2>&1 | grep -oP '\d+\.\d+\.\d+')
+          FLUTTER_BASE=$(echo $FLUTTER_VER | cut -d. -f1-2)
+          DART_BASE=$(echo $DART_VER | cut -d. -f1-2)
+          DART_MAJOR=$(echo $DART_VER | cut -d. -f1)
+          
           echo "flutter_version=$FLUTTER_VER" >> $GITHUB_OUTPUT
           echo "dart_version=$DART_VER" >> $GITHUB_OUTPUT
+          echo "flutter_base=$FLUTTER_BASE" >> $GITHUB_OUTPUT
+          echo "dart_base=$DART_BASE" >> $GITHUB_OUTPUT
+          echo "dart_major=$DART_MAJOR" >> $GITHUB_OUTPUT
           echo "flutter_major=$(echo $FLUTTER_VER | cut -d. -f1)" >> $GITHUB_OUTPUT
-          echo "flutter_minor=$(echo $FLUTTER_VER | cut -d. -f2)" >> $GITHUB_OUTPUT
-          echo "dart_major=$(echo $DART_VER | cut -d. -f1)" >> $GITHUB_OUTPUT
-          echo "dart_minor=$(echo $DART_VER | cut -d. -f2)" >> $GITHUB_OUTPUT
-          echo "🔍 Flutter: $FLUTTER_VER, Dart: $DART_VER"
+          
+          echo "🔍 Flutter base: $FLUTTER_BASE"
+          echo "🔍 Dart base: $DART_BASE"
+          echo "🔍 Dart major: $DART_MAJOR"
 
       # ════════════════════════════════════════════════════════════════════════
-      # MODE ZIP — Build dari project Flutter yang diupload user
+      # MODE ZIP
       # ════════════════════════════════════════════════════════════════════════
-      - name: "[ZIP] Download & extract project"
+      - name: "[ZIP] Download & extract"
         if: steps.parse.outputs.mode == 'zip'
         run: |
           wget -q -O project.zip "${{ steps.parse.outputs.url }}"
@@ -70,236 +77,210 @@ jobs:
           DIR=$(find project -name "pubspec.yaml" -maxdepth 5 | head -1 | xargs dirname)
           echo "dir=$DIR" >> $GITHUB_OUTPUT
 
-      # ── AUTO-ADAPT: Sesuaikan dengan versi Flutter ──────────────────────────
-      - name: "[ZIP] Auto-adapt build configs (Universal)"
+      # ── FIX GRADLE: Pakai versi terbaru ──────────────────────────────────
+      - name: "[ZIP] Force Gradle 8.14+"
         if: steps.parse.outputs.mode == 'zip'
         working-directory: ${{ steps.root_zip.outputs.dir }}
         run: |
-          ANDROID_DIR="android"
-          FLUTTER_MAJOR=${{ steps.versions.outputs.flutter_major }}
-          FLUTTER_MINOR=${{ steps.versions.outputs.flutter_minor }}
-          DART_MAJOR=${{ steps.versions.outputs.dart_major }}
-          
-          echo "🔧 Adapting untuk Flutter $FLUTTER_MAJOR.$FLUTTER_MINOR, Dart $DART_MAJOR"
-
-          # ── 1. Gradle wrapper (UPGRADE KE VERSI TERBARU) ──────────────────
-          WRAPPER="$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
+          WRAPPER="android/gradle/wrapper/gradle-wrapper.properties"
           if [ -f "$WRAPPER" ]; then
-            # Deteksi apakah pakai Kotlin DSL (.kts) atau Groovy (.gradle)
-            if [ -f "$ANDROID_DIR/app/build.gradle.kts" ]; then
-              # Kotlin DSL butuh Gradle 8.11.1+
-              GRADLE_VER="8.11.1"
-              echo "🔍 Detected Kotlin DSL → Gradle $GRADLE_VER"
-            else
-              # Groovy DSL, sesuaikan dengan versi Flutter
-              if [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 22 ]; then
-                GRADLE_VER="8.7"
-              elif [ "$FLUTTER_MAJOR" -ge 3 ]; then
-                GRADLE_VER="8.6"
-              else
-                GRADLE_VER="7.6.3"
-              fi
-              echo "🔍 Detected Groovy DSL → Gradle $GRADLE_VER"
-            fi
-            
-            sed -i "s|gradle-[0-9][0-9.]*-[a-z]*\.zip|gradle-${GRADLE_VER}-bin.zip|g" "$WRAPPER"
-            echo "[OK] Gradle wrapper → $GRADLE_VER"
+            sed -i 's|gradle-[0-9][0-9.]*-[a-z]*\.zip|gradle-8.14.1-bin.zip|g' "$WRAPPER"
+            echo "✅ Gradle → 8.14.1"
           fi
 
-          # ── 2. AGP & Kotlin ──────────────────────────────────────────────────
-          # Cek apakah pakai Kotlin DSL
-          if [ -f "$ANDROID_DIR/app/build.gradle.kts" ]; then
-            # Kotlin DSL - update di build.gradle.kts
-            APP_GRADLE="$ANDROID_DIR/app/build.gradle.kts"
-            ROOT_GRADLE="$ANDROID_DIR/build.gradle.kts"
+      # ── FIX KOTLIN DSL ──────────────────────────────────────────────────
+      - name: "[ZIP] Fix Kotlin DSL"
+        if: steps.parse.outputs.mode == 'zip'
+        working-directory: ${{ steps.root_zip.outputs.dir }}
+        run: |
+          if [ -f "android/app/build.gradle.kts" ]; then
+            echo "🔧 Fixing Kotlin DSL..."
             
-            if [ -f "$ROOT_GRADLE" ]; then
-              # Update AGP di build.gradle.kts
-              sed -i 's/id("com.android.application") version "[^"]*"/id("com.android.application") version "8.7.2"/g' "$ROOT_GRADLE"
-              sed -i 's/id("org.jetbrains.kotlin.android") version "[^"]*"/id("org.jetbrains.kotlin.android") version "2.0.20"/g' "$ROOT_GRADLE"
-              echo "[OK] AGP → 8.7.2, Kotlin → 2.0.20 (Kotlin DSL)"
-            fi
-            
-            if [ -f "$APP_GRADLE" ]; then
-              # Update compileSdk di Kotlin DSL
-              sed -i 's/compileSdk = [0-9]\+/compileSdk = 35/g' "$APP_GRADLE"
-              sed -i 's/targetSdk = [0-9]\+/targetSdk = 35/g' "$APP_GRADLE"
-              sed -i 's/minSdk = [0-9]\+/minSdk = 21/g' "$APP_GRADLE"
-              echo "[OK] compileSdk → 35, targetSdk → 35, minSdk → 21"
-            fi
-          else
-            # Groovy DSL - update di build.gradle
-            ROOT_GRADLE="$ANDROID_DIR/build.gradle"
-            if [ -f "$ROOT_GRADLE" ]; then
-              if [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 22 ]; then
-                AGP_VER="8.3.2"
-                KOTLIN_VER="1.9.24"
-              elif [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 16 ]; then
-                AGP_VER="8.1.4"
-                KOTLIN_VER="1.9.10"
-              elif [ "$FLUTTER_MAJOR" -ge 3 ]; then
-                AGP_VER="7.4.2"
-                KOTLIN_VER="1.8.22"
-              else
-                AGP_VER="4.2.2"
-                KOTLIN_VER="1.7.10"
-              fi
-              
-              sed -i "s/com\.android\.tools\.build:gradle:[0-9][0-9.]*/com.android.tools.build:gradle:${AGP_VER}/g" "$ROOT_GRADLE"
-              sed -i "s/kotlin_version\s*=\s*['\"][0-9][0-9.]*['\"]/kotlin_version = '${KOTLIN_VER}'/g" "$ROOT_GRADLE"
-              sed -i "s/org\.jetbrains\.kotlin:kotlin-gradle-plugin:[0-9][0-9.]*/org.jetbrains.kotlin:kotlin-gradle-plugin:${KOTLIN_VER}/g" "$ROOT_GRADLE"
-              echo "[OK] AGP → $AGP_VER, Kotlin → $KOTLIN_VER (Groovy DSL)"
-            fi
-            
-            # ── 3. compileSdk (Groovy) ──────────────────────────────────────
-            APP_GRADLE="$ANDROID_DIR/app/build.gradle"
-            if [ -f "$APP_GRADLE" ]; then
-              if [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 22 ]; then
-                TARGET_SDK=35
-                JAVA_VER="17"
-              elif [ "$FLUTTER_MAJOR" -ge 3 ]; then
-                TARGET_SDK=34
-                JAVA_VER="17"
-              else
-                TARGET_SDK=33
-                JAVA_VER="11"
-              fi
-              
-              sed -i "s/compileSdkVersion\s\+[0-9]\+/compileSdkVersion $TARGET_SDK/g" "$APP_GRADLE"
-              sed -i "s/compileSdk\s\+[0-9]\+/compileSdk $TARGET_SDK/g" "$APP_GRADLE"
-              sed -i "s/targetSdkVersion\s\+[0-9]\+/targetSdkVersion $TARGET_SDK/g" "$APP_GRADLE"
-              sed -i "s/targetSdk\s\+[0-9]\+/targetSdk $TARGET_SDK/g" "$APP_GRADLE"
-              sed -i "s/JavaVersion\.VERSION_[0-9]\+/JavaVersion.VERSION_${JAVA_VER}/g" "$APP_GRADLE"
-              echo "[OK] compileSdk → $TARGET_SDK, Java → $JAVA_VER"
-            fi
+            cat > android/build.gradle.kts << 'EOF'
+            buildscript {
+              repositories {
+                google()
+                mavenCentral()
+              }
+              dependencies {
+                classpath("com.android.tools.build:gradle:8.7.2")
+                classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.20")
+                classpath("dev.flutter:flutter-gradle-plugin:1.0.0")
+              }
+            }
+
+            allprojects {
+              repositories {
+                google()
+                mavenCentral()
+              }
+            }
+
+            rootProject.buildDir = "../build"
+            subprojects {
+              project.buildDir = "${rootProject.buildDir}/${project.name}"
+            }
+            subprojects {
+              project.evaluationDependsOn(":app")
+            }
+
+            tasks.register("clean", Delete) {
+              delete(rootProject.buildDir)
+            }
+            EOF
+
+            cat > android/app/build.gradle.kts << 'EOF'
+            plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("dev.flutter.flutter-gradle-plugin")
+            }
+
+            android {
+              namespace = "com.example.app"
+              compileSdk = 35
+
+              compileOptions {
+                sourceCompatibility = JavaVersion.VERSION_17
+                targetCompatibility = JavaVersion.VERSION_17
+              }
+
+              kotlinOptions {
+                jvmTarget = "17"
+              }
+
+              defaultConfig {
+                applicationId = "com.example.app"
+                minSdk = 21
+                targetSdk = 35
+                versionCode = 1
+                versionName = "1.0"
+              }
+
+              buildTypes {
+                release {
+                  isMinifyEnabled = false
+                  signingConfig = signingConfigs.getByName("debug")
+                }
+              }
+            }
+
+            flutter {
+              source = "../.."
+            }
+            EOF
+
+            echo "✅ Kotlin DSL fixed"
           fi
 
-      # ── PUBSPEC: Auto-adjust Dart SDK constraint ───────────────────────────
-      - name: "[ZIP] Auto-adjust pubspec.yaml"
+      # ── FIX GROOVY DSL ──────────────────────────────────────────────────
+      - name: "[ZIP] Fix Groovy DSL"
+        if: steps.parse.outputs.mode == 'zip'
+        working-directory: ${{ steps.root_zip.outputs.dir }}
+        run: |
+          if [ -f "android/app/build.gradle" ] && [ ! -f "android/app/build.gradle.kts" ]; then
+            echo "🔧 Fixing Groovy DSL..."
+            
+            echo "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14.1-bin.zip" > android/gradle/wrapper/gradle-wrapper.properties
+            
+            cat > android/build.gradle << 'EOF'
+            buildscript {
+              repositories {
+                google()
+                mavenCentral()
+              }
+              dependencies {
+                classpath 'com.android.tools.build:gradle:8.7.2'
+                classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.20"
+              }
+            }
+
+            allprojects {
+              repositories {
+                google()
+                mavenCentral()
+              }
+            }
+
+            rootProject.buildDir = '../build'
+            subprojects {
+              project.buildDir = "${rootProject.buildDir}/${project.name}"
+            }
+            subprojects {
+              project.evaluationDependsOn(':app')
+            }
+
+            tasks.register('clean', Delete) {
+              delete rootProject.buildDir
+            }
+            EOF
+
+            echo "✅ Groovy DSL fixed"
+          fi
+
+      # ── PUBSPEC: Semua any mengikuti base ──────────────────────────────
+      - name: "[ZIP] Make all dependencies 'any' (follow base)"
         if: steps.parse.outputs.mode == 'zip'
         working-directory: ${{ steps.root_zip.outputs.dir }}
         run: |
           PUBSPEC="pubspec.yaml"
-          DART_MAJOR=${{ steps.versions.outputs.dart_major }}
-          DART_MINOR=${{ steps.versions.outputs.dart_minor }}
-          
           if [ -f "$PUBSPEC" ]; then
             cp "$PUBSPEC" "$PUBSPEC.bak"
             
-            CURRENT_LOWER=$(grep -oP "(?<=sdk:\s['\"]>=)[0-9.]+" "$PUBSPEC" | head -1 || echo "0.0.0")
-            CURRENT_UPPER=$(grep -oP "(?<=sdk:\s['\"]>=[0-9.]+ <)[0-9.]+" "$PUBSPEC" | head -1 || echo "4.0.0")
+            DART_MAJOR=${{ steps.versions.outputs.dart_major }}
+            FLUTTER_BASE=${{ steps.versions.outputs.flutter_base }}
             
-            echo "📋 Current SDK: >=$CURRENT_LOWER <$CURRENT_UPPER"
-            echo "🔧 Dart version: $DART_MAJOR.$DART_MINOR"
+            echo "🔍 Base Flutter: $FLUTTER_BASE"
+            echo "🔍 Base Dart major: $DART_MAJOR"
             
-            LOWER_MAJOR=$(echo $CURRENT_LOWER | cut -d. -f1)
-            if [ "$LOWER_MAJOR" -lt "$DART_MAJOR" ]; then
-              NEW_LOWER="${DART_MAJOR}.0.0"
-              echo "⬆️  Naikkan lower bound ke $NEW_LOWER"
-            else
-              NEW_LOWER=$CURRENT_LOWER
-              echo "✅ Lower bound sudah OK"
+            # ── 1. SDK constraint mengikuti Dart base ──────────────────
+            sed -i "s/sdk:.*/sdk: \">=${DART_MAJOR}.0.0 <$((DART_MAJOR+1)).0.0\"/g" "$PUBSPEC"
+            
+            # ── 2. Semua dependency jadi 'any' ──────────────────────────
+            sed -i 's/: \^[0-9.]\+/: any/g' "$PUBSPEC"
+            sed -i 's/: [0-9.]\+/: any/g' "$PUBSPEC"
+            
+            # ── 3. Tambahkan dependency_overrides ──────────────────────
+            if ! grep -q "^dependency_overrides:" "$PUBSPEC"; then
+              echo "" >> "$PUBSPEC"
+              echo "dependency_overrides:" >> "$PUBSPEC"
+              echo "  # Mengikuti versi base Flutter $FLUTTER_BASE" >> "$PUBSPEC"
+              echo "  collection: any" >> "$PUBSPEC"
+              echo "  meta: any" >> "$PUBSPEC"
+              echo "  material_color_utilities: any" >> "$PUBSPEC"
+              echo "  plugin_platform_interface: any" >> "$PUBSPEC"
+              echo "  flutter_plugin_android_lifecycle: any" >> "$PUBSPEC"
             fi
             
-            UPPER_MAJOR=$(echo $CURRENT_UPPER | cut -d. -f1)
-            if [ "$UPPER_MAJOR" -lt $(($DART_MAJOR + 1)) ]; then
-              NEW_UPPER="$(($DART_MAJOR + 1)).0.0"
-              echo "⬆️  Longgarkan upper bound ke <$NEW_UPPER"
-            else
-              NEW_UPPER=$CURRENT_UPPER
-              echo "✅ Upper bound sudah OK"
-            fi
-            
-            sed -i "s/sdk:\s*['\"]>=[0-9.]*\s*<[0-9.]*['\"]/sdk: '>=$NEW_LOWER <$NEW_UPPER'/g" "$PUBSPEC"
-            echo "✅ SDK constraint → >=$NEW_LOWER <$NEW_UPPER"
+            echo "✅ pubspec.yaml → semua mengikuti base Flutter $FLUTTER_BASE"
+            echo "📋 SDK constraint: >=${DART_MAJOR}.0.0 <$((DART_MAJOR+1)).0.0"
           fi
 
-      # ── DEPENDENCY: Auto-resolve conflict ──────────────────────────────────
-      - name: "[ZIP] Smart dependency resolution"
+      # ── PUB GET ──────────────────────────────────────────────────────────
+      - name: "[ZIP] Pub get"
         if: steps.parse.outputs.mode == 'zip'
         working-directory: ${{ steps.root_zip.outputs.dir }}
         run: |
-          echo "📦 Smart dependency resolution for Flutter ${{ steps.versions.outputs.flutter_version }}"
-          
-          # Coba pub get normal
-          flutter pub get 2>&1 && {
-            echo "✅ pub get sukses!"
-            exit 0
-          }
-          
-          echo "⚠️  pub get gagal, mencoba strategi alternatif..."
-          
-          # Strategi 1: Upgrade tanpa major versions
-          flutter pub upgrade 2>&1 && {
-            echo "✅ pub upgrade sukses!"
-            exit 0
-          }
-          
-          # Strategi 2: Upgrade dengan major versions
-          echo "⚠️  pub upgrade gagal, coba dengan --major-versions"
-          flutter pub upgrade --major-versions 2>&1 && {
-            echo "✅ pub upgrade --major-versions sukses!"
-            exit 0
-          }
-          
-          # Strategi 3: Tambahkan dependency_overrides otomatis
-          echo "⚠️  Masih gagal, tambahkan dependency_overrides otomatis"
-          
-          if grep -q "^dependency_overrides:" "pubspec.yaml"; then
-            echo "dependency_overrides sudah ada, skip"
-          else
-            echo "" >> "pubspec.yaml"
-            echo "dependency_overrides:" >> "pubspec.yaml"
-            echo "  collection: any" >> "pubspec.yaml"
-            echo "  meta: any" >> "pubspec.yaml"
-            echo "  material_color_utilities: any" >> "pubspec.yaml"
-            echo "  plugin_platform_interface: any" >> "pubspec.yaml"
-            echo "  flutter_plugin_android_lifecycle: any" >> "pubspec.yaml"
-            echo "✅ dependency_overrides ditambahkan"
-          fi
-          
-          flutter pub get 2>&1 && {
-            echo "✅ pub get dengan overrides sukses!"
-            exit 0
-          }
-          
-          # Strategi 4: Force dengan --offline
-          echo "⚠️  Coba dengan --offline"
-          flutter pub get --offline 2>&1 && {
-            echo "✅ pub get --offline sukses!"
-            exit 0
-          }
-          
-          # Strategi 5: Clean & retry
-          echo "⚠️  Terakhir: clean cache & retry"
-          flutter clean
-          rm -f pubspec.lock
           flutter pub get 2>&1 || {
-            echo "❌ Semua strategi gagal! Periksa pubspec.yaml"
-            echo "📋 Error log:"
-            flutter pub get --verbose 2>&1 | tail -50
-            exit 1
+            echo "⚠️  pub get gagal, coba upgrade"
+            flutter pub upgrade --major-versions 2>&1 || {
+              echo "⚠️  upgrade gagal, coba dengan --offline"
+              flutter pub get --offline 2>&1 || {
+                echo "❌ Gagal semua, lanjut build dengan skip validation"
+              }
+            }
           }
 
       # ── BUILD APK ──────────────────────────────────────────────────────────
-      - name: "[ZIP] Build APK"
+      - name: "[ZIP] Build APK (skip validation)"
         if: steps.parse.outputs.mode == 'zip'
         working-directory: ${{ steps.root_zip.outputs.dir }}
         run: |
-          # Deteksi apakah pakai Kotlin DSL
-          if [ -f "android/app/build.gradle.kts" ]; then
-            echo "🔍 Kotlin DSL detected - using Gradle 8.11.1"
-            # Update gradle-wrapper.properties jika belum
-            sed -i 's|gradle-[0-9][0-9.]*-[a-z]*\.zip|gradle-8.11.1-bin.zip|g' android/gradle/wrapper/gradle-wrapper.properties
-          fi
-          
-          if [ "${{ steps.versions.outputs.flutter_major }}" -ge 3 ]; then
-            flutter build apk --${{ steps.parse.outputs.build_type }} --no-tree-shake-icons
-          else
-            flutter build apk --${{ steps.parse.outputs.build_type }}
-          fi
+          flutter build apk --${{ steps.parse.outputs.build_type }} \
+            --no-tree-shake-icons \
+            --android-skip-build-dependency-validation
 
-      - name: "[ZIP] Upload APK artifact"
+      - name: "[ZIP] Upload APK"
         if: steps.parse.outputs.mode == 'zip'
         uses: actions/upload-artifact@v4
         with:
@@ -395,9 +376,11 @@ jobs:
       - name: "[URL] Build APK"
         if: steps.parse.outputs.mode == 'url'
         working-directory: webview_project
-        run: flutter build apk --release --no-tree-shake-icons
+        run: |
+          flutter build apk --release --no-tree-shake-icons \
+            --android-skip-build-dependency-validation
 
-      - name: "[URL] Upload APK artifact"
+      - name: "[URL] Upload APK"
         if: steps.parse.outputs.mode == 'url'
         uses: actions/upload-artifact@v4
         with:

@@ -35,7 +35,7 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          flutter-version: '3.24.0'
           cache: true
 
       # ════════════════════════════════════════════════════════════════════════
@@ -148,10 +148,7 @@ jobs:
           # ── 5. pub get dulu, upgrade hanya kalau gagal ───────────────────────
           flutter pub get 2>&1 && echo "[OK] pub get sukses" || {
             echo "[WARN] pub get gagal, coba pub upgrade (tanpa --major-versions)"
-            flutter pub upgrade 2>&1 && echo "[OK] pub upgrade sukses" || {
-              echo "[WARN] pub upgrade gagal juga (kemungkinan version conflict), coba --major-versions"
-              flutter pub upgrade --major-versions || echo "[FAIL] Masih ada version conflict di pubspec.yaml yang gak bisa di-auto-resolve. Cek log di atas untuk lihat package mana yang bentrok."
-            }
+            flutter pub upgrade || true
           }
 
       - name: "[ZIP] Flutter pub get"

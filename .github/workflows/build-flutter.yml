@@ -1,4 +1,4 @@
-name: Build Flutter APK
+name: Build Flutter APK (Universal)
 
 on:
   workflow_dispatch:
@@ -24,19 +24,35 @@ jobs:
           echo "build_type=$(jq -r '.buildType // "release"' payload.json)" >> $GITHUB_OUTPUT
           echo "app_name=$(jq -r '.appName // "MyApp"' payload.json)"  >> $GITHUB_OUTPUT
           echo "icon_url=$(jq -r '.iconUrl // ""' payload.json)"       >> $GITHUB_OUTPUT
+          echo "flutter_version=$(jq -r '.flutterVersion // "stable"' payload.json)" >> $GITHUB_OUTPUT
 
-      # ── 2. Setup Java & Flutter ─────────────────────────────────────────────
+      # ── 2. Setup Java ──────────────────────────────────────────────────────
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
+      # ── 3. Setup Flutter ──────────────────────────────────────────────────
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
+          channel: ${{ steps.parse.outputs.flutter_version }}
           cache: true
+
+      # ── 4. Deteksi versi Flutter & Dart ──────────────────────────────────
+      - name: Detect Flutter/Dart versions
+        id: versions
+        run: |
+          FLUTTER_VER=$(flutter --version | head -1 | grep -oP '\d+\.\d+\.\d+')
+          DART_VER=$(dart --version 2>&1 | grep -oP '\d+\.\d+\.\d+')
+          echo "flutter_version=$FLUTTER_VER" >> $GITHUB_OUTPUT
+          echo "dart_version=$DART_VER" >> $GITHUB_OUTPUT
+          echo "flutter_major=$(echo $FLUTTER_VER | cut -d. -f1)" >> $GITHUB_OUTPUT
+          echo "flutter_minor=$(echo $FLUTTER_VER | cut -d. -f2)" >> $GITHUB_OUTPUT
+          echo "dart_major=$(echo $DART_VER | cut -d. -f1)" >> $GITHUB_OUTPUT
+          echo "dart_minor=$(echo $DART_VER | cut -d. -f2)" >> $GITHUB_OUTPUT
+          echo "🔍 Flutter: $FLUTTER_VER, Dart: $DART_VER"
 
       # ════════════════════════════════════════════════════════════════════════
       # MODE ZIP — Build dari project Flutter yang diupload user
@@ -54,112 +70,192 @@ jobs:
           DIR=$(find project -name "pubspec.yaml" -maxdepth 5 | head -1 | xargs dirname)
           echo "dir=$DIR" >> $GITHUB_OUTPUT
 
-      # ── AUTO UPGRADE: Gradle, AGP, SDK, Kotlin, pubspec ──────────────────────
-      - name: "[ZIP] Auto-upgrade build configs"
+      # ── AUTO-ADAPT: Sesuaikan dengan versi Flutter ──────────────────────────
+      - name: "[ZIP] Auto-adapt build configs (Universal)"
         if: steps.parse.outputs.mode == 'zip'
         working-directory: ${{ steps.root_zip.outputs.dir }}
         run: |
           ANDROID_DIR="android"
+          FLUTTER_MAJOR=${{ steps.versions.outputs.flutter_major }}
+          FLUTTER_MINOR=${{ steps.versions.outputs.flutter_minor }}
+          DART_MAJOR=${{ steps.versions.outputs.dart_major }}
+          
+          echo "🔧 Adapting untuk Flutter $FLUTTER_MAJOR.$FLUTTER_MINOR, Dart $DART_MAJOR"
 
-          # ── 1. Gradle wrapper → 8.7 ─────────────────────────────────────────
+          # ── 1. Gradle wrapper ──────────────────────────────────────────────
           WRAPPER="$ANDROID_DIR/gradle/wrapper/gradle-wrapper.properties"
           if [ -f "$WRAPPER" ]; then
-            sed -i 's|gradle-[0-9][0-9.]*-[a-z]*\.zip|gradle-8.7-bin.zip|g' "$WRAPPER"
-            echo "[OK] Gradle wrapper → 8.7"
+            if [ "$FLUTTER_MAJOR" -ge 3 ]; then
+              GRADLE_VER="8.7"
+            else
+              GRADLE_VER="7.6.3"
+            fi
+            sed -i "s|gradle-[0-9][0-9.]*-[a-z]*\.zip|gradle-${GRADLE_VER}-bin.zip|g" "$WRAPPER"
+            echo "[OK] Gradle wrapper → $GRADLE_VER"
           fi
 
-          # ── 2. AGP → 8.3.2 & Kotlin → 1.9.24 ───────────────────────────────
+          # ── 2. AGP & Kotlin ──────────────────────────────────────────────────
           ROOT_GRADLE="$ANDROID_DIR/build.gradle"
           if [ -f "$ROOT_GRADLE" ]; then
-            sed -i "s/com\.android\.tools\.build:gradle:[0-9][0-9.]*/com.android.tools.build:gradle:8.3.2/g" "$ROOT_GRADLE"
-            sed -i "s/kotlin_version\s*=\s*['\"][0-9][0-9.]*['\"]/kotlin_version = '1.9.24'/g" "$ROOT_GRADLE"
-            sed -i "s/org\.jetbrains\.kotlin:kotlin-gradle-plugin:[0-9][0-9.]*/org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24/g" "$ROOT_GRADLE"
-            echo "[OK] AGP → 8.3.2, Kotlin → 1.9.24"
+            if [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 22 ]; then
+              AGP_VER="8.3.2"
+              KOTLIN_VER="1.9.24"
+            elif [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 16 ]; then
+              AGP_VER="8.1.4"
+              KOTLIN_VER="1.9.10"
+            elif [ "$FLUTTER_MAJOR" -ge 3 ]; then
+              AGP_VER="7.4.2"
+              KOTLIN_VER="1.8.22"
+            else
+              AGP_VER="4.2.2"
+              KOTLIN_VER="1.7.10"
+            fi
+            
+            sed -i "s/com\.android\.tools\.build:gradle:[0-9][0-9.]*/com.android.tools.build:gradle:${AGP_VER}/g" "$ROOT_GRADLE"
+            sed -i "s/kotlin_version\s*=\s*['\"][0-9][0-9.]*['\"]/kotlin_version = '${KOTLIN_VER}'/g" "$ROOT_GRADLE"
+            sed -i "s/org\.jetbrains\.kotlin:kotlin-gradle-plugin:[0-9][0-9.]*/org.jetbrains.kotlin:kotlin-gradle-plugin:${KOTLIN_VER}/g" "$ROOT_GRADLE"
+            echo "[OK] AGP → $AGP_VER, Kotlin → $KOTLIN_VER"
           fi
 
-          # ── 3. compileSdk / targetSdk — naikan hanya kalau perlu, cap di 35 ────
+          # ── 3. compileSdk ──────────────────────────────────────────────────
           APP_GRADLE="$ANDROID_DIR/app/build.gradle"
-          MIN_SDK=34   # minimum aman
-          MAX_SDK=35   # cap — 36/37 belum semua plugin support
           if [ -f "$APP_GRADLE" ]; then
-            # Baca versi asli project
-            CURRENT=$(grep -oP '(?<=compileSdk\s)[0-9]+|(?<=compileSdkVersion\s)[0-9]+' "$APP_GRADLE" | head -1)
-            CURRENT=${CURRENT:-0}
-            echo "[INFO] compileSdk asli project: $CURRENT"
-
-            if [ "$CURRENT" -lt "$MIN_SDK" ]; then
-              # Di bawah minimum → naikan ke MAX_SDK
-              TARGET_SDK=$MAX_SDK
-              echo "[OK] compileSdk $CURRENT < $MIN_SDK → upgrade ke $TARGET_SDK"
-            elif [ "$CURRENT" -gt "$MAX_SDK" ]; then
-              # Di atas cap → turunkan ke MAX_SDK (hindari SDK belum stable)
-              TARGET_SDK=$MAX_SDK
-              echo "[WARN] compileSdk $CURRENT > $MAX_SDK → cap ke $TARGET_SDK"
+            if [ "$FLUTTER_MAJOR" -ge 3 ] && [ "$FLUTTER_MINOR" -ge 22 ]; then
+              TARGET_SDK=35
+              JAVA_VER="17"
+            elif [ "$FLUTTER_MAJOR" -ge 3 ]; then
+              TARGET_SDK=34
+              JAVA_VER="17"
             else
-              # Sudah dalam range aman → biarkan
-              TARGET_SDK=$CURRENT
-              echo "[OK] compileSdk $CURRENT sudah dalam range, tidak diubah"
+              TARGET_SDK=33
+              JAVA_VER="11"
             fi
-
+            
             sed -i "s/compileSdkVersion\s\+[0-9]\+/compileSdkVersion $TARGET_SDK/g" "$APP_GRADLE"
-            sed -i "s/compileSdk\s\+[0-9]\+/compileSdk $TARGET_SDK/g"               "$APP_GRADLE"
-            sed -i "s/targetSdkVersion\s\+[0-9]\+/targetSdkVersion $TARGET_SDK/g"   "$APP_GRADLE"
-            sed -i "s/targetSdk\s\+[0-9]\+/targetSdk $TARGET_SDK/g"                 "$APP_GRADLE"
-            # Java source/target compatibility → 17
-            sed -i 's/JavaVersion\.VERSION_1_[0-9]\+/JavaVersion.VERSION_17/g' "$APP_GRADLE"
-            sed -i 's/JavaVersion\.VERSION_[0-9]\+/JavaVersion.VERSION_17/g'   "$APP_GRADLE"
-            echo "[OK] compileSdk/targetSdk final: $TARGET_SDK, Java → 17"
+            sed -i "s/compileSdk\s\+[0-9]\+/compileSdk $TARGET_SDK/g" "$APP_GRADLE"
+            sed -i "s/targetSdkVersion\s\+[0-9]\+/targetSdkVersion $TARGET_SDK/g" "$APP_GRADLE"
+            sed -i "s/targetSdk\s\+[0-9]\+/targetSdk $TARGET_SDK/g" "$APP_GRADLE"
+            sed -i "s/JavaVersion\.VERSION_[0-9]\+/JavaVersion.VERSION_${JAVA_VER}/g" "$APP_GRADLE"
+            echo "[OK] compileSdk → $TARGET_SDK, Java → $JAVA_VER"
           fi
 
-          # ── 4. pubspec.yaml: aman, hanya longgarkan upper bound ────────────────
-          PUBSPEC="pubspec.yaml"
-          if [ -f "$PUBSPEC" ]; then
-            # Baca lower & upper bound asli
-            DART_CONSTRAINT=$(grep -oP "(?<=sdk:\s['\"]>=)[0-9.]+" "$PUBSPEC" | head -1)
-            DART_UPPER=$(grep -oP "(?<=sdk:\s['\"]>=[0-9.]+ <)[0-9.]+" "$PUBSPEC" | head -1)
-            echo "[INFO] Dart SDK constraint asli: >=${DART_CONSTRAINT:-?} <${DART_UPPER:-?}"
-
-            # Flutter 3.24 butuh Dart >=3.3 — kalau lower bound < 3.0 naikkan ke 3.3.0
-            LOWER=${DART_CONSTRAINT:-0.0.0}
-            LOWER_MAJOR=$(echo $LOWER | cut -d. -f1)
-            if [ "$LOWER_MAJOR" -lt 3 ]; then
-              NEW_LOWER="3.3.0"
-              echo "[OK] Lower bound $LOWER < 3.x → naik ke $NEW_LOWER"
-            else
-              NEW_LOWER=$LOWER
-              echo "[OK] Lower bound $LOWER sudah >=3.x, dibiarkan"
-            fi
-
-            # Upper bound: kalau <3.x → longgarkan ke <4.0.0, kalau udah >=4.x biarkan
-            UPPER_MAJOR=$(echo ${DART_UPPER:-3.0.0} | cut -d. -f1)
-            if [ "$UPPER_MAJOR" -lt 4 ]; then
-              NEW_UPPER="4.0.0"
-              echo "[OK] Upper bound <${DART_UPPER} → longgarkan ke <4.0.0"
-            else
-              NEW_UPPER=$DART_UPPER
-              echo "[OK] Upper bound sudah >=4.x, dibiarkan"
-            fi
-
-            # Terapkan hanya kalau ada perubahan
-            sed -i "s/sdk:\s*['\"]>=[0-9.]*\s*<[0-9.]*['\"]/sdk: '>=${NEW_LOWER} <${NEW_UPPER}'/g" "$PUBSPEC"
-            echo "[OK] pubspec sdk constraint → >=${NEW_LOWER} <${NEW_UPPER}"
-          fi
-
-          # ── 5. pub get dulu, upgrade hanya kalau gagal ───────────────────────
-          flutter pub get 2>&1 && echo "[OK] pub get sukses" || {
-            echo "[WARN] pub get gagal, coba pub upgrade (tanpa --major-versions)"
-            flutter pub upgrade || true
-          }
-
-      - name: "[ZIP] Flutter pub get"
+      # ── PUBSPEC: Auto-adjust Dart SDK constraint ───────────────────────────
+      - name: "[ZIP] Auto-adjust pubspec.yaml"
         if: steps.parse.outputs.mode == 'zip'
         working-directory: ${{ steps.root_zip.outputs.dir }}
-        run: flutter pub get
+        run: |
+          PUBSPEC="pubspec.yaml"
+          DART_MAJOR=${{ steps.versions.outputs.dart_major }}
+          DART_MINOR=${{ steps.versions.outputs.dart_minor }}
+          
+          if [ -f "$PUBSPEC" ]; then
+            cp "$PUBSPEC" "$PUBSPEC.bak"
+            
+            CURRENT_LOWER=$(grep -oP "(?<=sdk:\s['\"]>=)[0-9.]+" "$PUBSPEC" | head -1 || echo "0.0.0")
+            CURRENT_UPPER=$(grep -oP "(?<=sdk:\s['\"]>=[0-9.]+ <)[0-9.]+" "$PUBSPEC" | head -1 || echo "4.0.0")
+            
+            echo "📋 Current SDK: >=$CURRENT_LOWER <$CURRENT_UPPER"
+            echo "🔧 Dart version: $DART_MAJOR.$DART_MINOR"
+            
+            LOWER_MAJOR=$(echo $CURRENT_LOWER | cut -d. -f1)
+            if [ "$LOWER_MAJOR" -lt "$DART_MAJOR" ]; then
+              NEW_LOWER="${DART_MAJOR}.0.0"
+              echo "⬆️  Naikkan lower bound ke $NEW_LOWER"
+            else
+              NEW_LOWER=$CURRENT_LOWER
+              echo "✅ Lower bound sudah OK"
+            fi
+            
+            UPPER_MAJOR=$(echo $CURRENT_UPPER | cut -d. -f1)
+            if [ "$UPPER_MAJOR" -lt $(($DART_MAJOR + 1)) ]; then
+              NEW_UPPER="$(($DART_MAJOR + 1)).0.0"
+              echo "⬆️  Longgarkan upper bound ke <$NEW_UPPER"
+            else
+              NEW_UPPER=$CURRENT_UPPER
+              echo "✅ Upper bound sudah OK"
+            fi
+            
+            sed -i "s/sdk:\s*['\"]>=[0-9.]*\s*<[0-9.]*['\"]/sdk: '>=$NEW_LOWER <$NEW_UPPER'/g" "$PUBSPEC"
+            echo "✅ SDK constraint → >=$NEW_LOWER <$NEW_UPPER"
+          fi
 
+      # ── DEPENDENCY: Auto-resolve conflict ──────────────────────────────────
+      - name: "[ZIP] Smart dependency resolution"
+        if: steps.parse.outputs.mode == 'zip'
+        working-directory: ${{ steps.root_zip.outputs.dir }}
+        run: |
+          echo "📦 Smart dependency resolution for Flutter ${{ steps.versions.outputs.flutter_version }}"
+          
+          # Coba pub get normal
+          flutter pub get 2>&1 && {
+            echo "✅ pub get sukses!"
+            exit 0
+          }
+          
+          echo "⚠️  pub get gagal, mencoba strategi alternatif..."
+          
+          # Strategi 1: Upgrade tanpa major versions
+          flutter pub upgrade 2>&1 && {
+            echo "✅ pub upgrade sukses!"
+            exit 0
+          }
+          
+          # Strategi 2: Upgrade dengan major versions
+          echo "⚠️  pub upgrade gagal, coba dengan --major-versions"
+          flutter pub upgrade --major-versions 2>&1 && {
+            echo "✅ pub upgrade --major-versions sukses!"
+            exit 0
+          }
+          
+          # Strategi 3: Tambahkan dependency_overrides otomatis
+          echo "⚠️  Masih gagal, tambahkan dependency_overrides otomatis"
+          
+          if grep -q "^dependency_overrides:" "pubspec.yaml"; then
+            echo "dependency_overrides sudah ada, skip"
+          else
+            echo "" >> "pubspec.yaml"
+            echo "dependency_overrides:" >> "pubspec.yaml"
+            echo "  collection: any" >> "pubspec.yaml"
+            echo "  meta: any" >> "pubspec.yaml"
+            echo "  material_color_utilities: any" >> "pubspec.yaml"
+            echo "  plugin_platform_interface: any" >> "pubspec.yaml"
+            echo "  flutter_plugin_android_lifecycle: any" >> "pubspec.yaml"
+            echo "✅ dependency_overrides ditambahkan"
+          fi
+          
+          flutter pub get 2>&1 && {
+            echo "✅ pub get dengan overrides sukses!"
+            exit 0
+          }
+          
+          # Strategi 4: Force dengan --offline
+          echo "⚠️  Coba dengan --offline"
+          flutter pub get --offline 2>&1 && {
+            echo "✅ pub get --offline sukses!"
+            exit 0
+          }
+          
+          # Strategi 5: Clean & retry
+          echo "⚠️  Terakhir: clean cache & retry"
+          flutter clean
+          rm -f pubspec.lock
+          flutter pub get 2>&1 || {
+            echo "❌ Semua strategi gagal! Periksa pubspec.yaml"
+            echo "📋 Error log:"
+            flutter pub get --verbose 2>&1 | tail -50
+            exit 1
+          }
+
+      # ── BUILD APK ──────────────────────────────────────────────────────────
       - name: "[ZIP] Build APK"
         if: steps.parse.outputs.mode == 'zip'
         working-directory: ${{ steps.root_zip.outputs.dir }}
-        run: flutter build apk --${{ steps.parse.outputs.build_type }} --no-tree-shake-icons
+        run: |
+          if [ "${{ steps.versions.outputs.flutter_major }}" -ge 3 ]; then
+            flutter build apk --${{ steps.parse.outputs.build_type }} --no-tree-shake-icons
+          else
+            flutter build apk --${{ steps.parse.outputs.build_type }}
+          fi
 
       - name: "[ZIP] Upload APK artifact"
         if: steps.parse.outputs.mode == 'zip'
@@ -170,7 +266,7 @@ jobs:
           retention-days: 1
 
       # ════════════════════════════════════════════════════════════════════════
-      # MODE URL — Web2APK: wrap website ke dalam Flutter WebView APK
+      # MODE URL — Web2APK
       # ════════════════════════════════════════════════════════════════════════
       - name: "[URL] Create Flutter WebView project"
         if: steps.parse.outputs.mode == 'url'
@@ -228,7 +324,6 @@ jobs:
         if: steps.parse.outputs.mode == 'url'
         run: |
           APP="${{ steps.parse.outputs.app_name }}"
-          # AndroidManifest
           sed -i "s/android:label=\"[^\"]*\"/android:label=\"${APP}\"/" \
             webview_project/android/app/src/main/AndroidManifest.xml
 
@@ -236,7 +331,6 @@ jobs:
         if: steps.parse.outputs.mode == 'url' && steps.parse.outputs.icon_url != ''
         run: |
           wget -q -O icon_raw "${{ steps.parse.outputs.icon_url }}"
-          # Resize ke resolusi standar mipmap
           sudo apt-get install -y imagemagick -q
           for size in 48 72 96 144 192; do
             case $size in
@@ -268,4 +362,3 @@ jobs:
           name: apk-${{ inputs.jobId }}
           path: webview_project/build/app/outputs/flutter-apk/*.apk
           retention-days: 1
-          

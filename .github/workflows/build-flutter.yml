@@ -127,7 +127,7 @@ jobs:
             tasks.register("clean", Delete) {
               delete(rootProject.buildDir)
             }
-            EOF
+          EOF
 
             cat > android/app/build.gradle.kts << 'EOF'
             plugins {
@@ -168,7 +168,7 @@ jobs:
             flutter {
               source = "../.."
             }
-            EOF
+          EOF
 
             echo "✅ Kotlin DSL fixed"
           fi
@@ -213,7 +213,7 @@ jobs:
             tasks.register('clean', Delete) {
               delete rootProject.buildDir
             }
-            EOF
+          EOF
 
             echo "✅ Groovy DSL fixed"
           fi

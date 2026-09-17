@@ -23,10 +23,15 @@ jobs:
     timeout-minutes: 60
 
     env:
-      MIN_ANDROID_SDK: "36"
+      # ── Baseline long-term. Naikkan kalau Flutter SDK baru butuh lebih. ──
+      # Auto-bump di step Build akan naikkan otomatis kalau plugin minta SDK lebih tinggi.
+      MIN_ANDROID_SDK: "37"
       GRADLE_VERSION: "8.14.1"
       AGP_VERSION: "8.7.2"
       KOTLIN_VERSION: "2.0.20"
+      PACKAGE_PINS: |
+        # Tambahkan paket lain di sini jika perlu pin versi, contoh:
+        # some_legacy_pkg:^2.0.0
 
     steps:
       # ═════════════════════════════════════════════════════════════════════
@@ -108,7 +113,7 @@ jobs:
           echo "🔍 Flutter $FLUTTER_VER / Dart $DART_VER"
 
       # ═════════════════════════════════════════════════════════════════════
-      # 3. PREPARE SCRIPTS (tidak menyentuh kode .dart user)
+      # 3. PREPARE SCRIPTS
       # ═════════════════════════════════════════════════════════════════════
       - name: Prepare universal scripts
         run: |
@@ -119,7 +124,7 @@ jobs:
           #!/usr/bin/env bash
           set -uo pipefail
           PROJECT_DIR="${1:-.}"
-          MIN_SDK="${MIN_ANDROID_SDK:-36}"
+          MIN_SDK="${MIN_ANDROID_SDK:-37}"
           log() { echo "[$(date +%H:%M:%S)] $*"; }
           log "📂 Project: $PROJECT_DIR | MIN_SDK: $MIN_SDK"
 
@@ -170,7 +175,13 @@ jobs:
             for CHANNEL in "" "--channel=3" "--channel=2"; do
               if "$SDKMANAGER" $CHANNEL "platforms;android-$MAX" >/tmp/sdkmgr.log 2>&1; then INSTALLED=1; break; fi
             done
-            [ "$INSTALLED" -eq 0 ] && { log "⚠️  Fallback ke $MIN_SDK"; MAX=$MIN_SDK; }
+            if [ "$INSTALLED" -eq 0 ]; then
+              log "⚠️  Gagal install platforms;android-$MAX — coba fallback ke $MIN_SDK"
+              MAX=$MIN_SDK
+              if [ ! -d "$ANDROID_HOME/platforms/android-$MAX" ]; then
+                "$SDKMANAGER" "platforms;android-$MAX" >/dev/null 2>&1 || true
+              fi
+            fi
           fi
           log "📦 Platforms:"; ls "$ANDROID_HOME/platforms" 2>/dev/null | sed 's/^/  - /'
 
@@ -229,7 +240,7 @@ jobs:
           ICON
           chmod +x /tmp/ci/rename-icons.sh
 
-          # ── report-errors.sh — ekstrak error Dart dari build.log ────
+          # ── report-errors.sh ────────────────────────────────────────
           cat > /tmp/ci/report-errors.sh << 'REPORT'
           #!/usr/bin/env bash
           set -uo pipefail
@@ -265,9 +276,9 @@ jobs:
               echo ""
               echo "| Error | Solusi |"
               echo "|---|---|"
-              echo "| \`FaIconData can't be assigned to IconData?\` | Ganti \`Icon(FontAwesomeIcons.x)\` → \`FaIcon(FontAwesomeIcons.x)\` (font_awesome_flutter v11) |"
+              echo "| \`FaIconData can't be assigned to IconData?\` | Ganti \`Icon(FontAwesomeIcons.x)\` → \`FaIcon(FontAwesomeIcons.x)\` |"
               echo "| \`withOpacity isn't defined\` | Ganti \`.withOpacity(0.5)\` → \`.withValues(alpha: 0.5)\` |"
-              echo "| \`background isn't defined for ColorScheme\` | Ganti \`.background\` → \`.surface\`, \`.onBackground\` → \`.onSurface\` |"
+              echo "| \`background isn't defined for ColorScheme\` | Ganti \`.background\` → \`.surface\` |"
               echo "| \`MaterialStateProperty not found\` | Ganti \`MaterialState*\` → \`WidgetState*\` |"
             } >> $GITHUB_STEP_SUMMARY
           else
@@ -292,6 +303,88 @@ jobs:
           fi
           REPORT
           chmod +x /tmp/ci/report-errors.sh
+
+          # ── build-with-autobump.sh ──────────────────────────────────
+          cat > /tmp/ci/build-with-autobump.sh << 'BUILD'
+          #!/usr/bin/env bash
+          set -uo pipefail
+          PROJECT="${1:-.}"
+          OUTPUT="${2:-apk}"
+          MODE="${3:-release}"
+          MAX_ATTEMPTS="${4:-3}"
+
+          cd "$PROJECT" || { echo "❌ project dir not found"; exit 1; }
+
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "▶️  BUILD ATTEMPT $attempt/$MAX_ATTEMPTS (MIN_ANDROID_SDK=${MIN_ANDROID_SDK:-37})"
+            echo "════════════════════════════════════════════════════════════"
+
+            set +e
+            flutter build "$OUTPUT" "--$MODE" \
+              --no-tree-shake-icons \
+              --android-skip-build-dependency-validation 2>&1 | tee /tmp/build.log
+            STATUS=${PIPESTATUS[0]}
+            set -e
+
+            if [ "$STATUS" -eq 0 ]; then
+              echo ""
+              echo "✅ Build sukses pada attempt $attempt"
+              exit 0
+            fi
+
+            echo ""
+            echo "❌ Build attempt $attempt gagal (exit=$STATUS)"
+
+            # ── Cari versi SDK yang dibutuhkan dari log ──────────────
+            NEEDED_SDK=""
+            NEEDED_SDK=$(grep -oiP 'requires Android SDK version \K\d+' /tmp/build.log | head -1 || true)
+            [ -z "$NEEDED_SDK" ] && NEEDED_SDK=$(grep -oiP 'requires (?:compileSdk|SDK)(?: version)? \K\d+' /tmp/build.log | head -1 || true)
+            [ -z "$NEEDED_SDK" ] && NEEDED_SDK=$(grep -oiP 'platforms;android-\K\d+' /tmp/build.log | head -1 || true)
+            [ -z "$NEEDED_SDK" ] && NEEDED_SDK=$(grep -oiP 'Failed to find Platform SDK with path: platforms;android-\K\d+' /tmp/build.log | head -1 || true)
+
+            # ── Tidak ada indikasi SDK → bukan masalah SDK ───────────
+            if [ -z "$NEEDED_SDK" ]; then
+              echo ""
+              echo "⚠️  Tidak bisa deteksi versi SDK dari log."
+              echo "📋 Kemungkinan error bukan SDK (Dart / kode user / manifest)."
+              bash /tmp/ci/report-errors.sh /tmp/build.log
+              exit "$STATUS"
+            fi
+
+            echo ""
+            echo "🔍 Error minta Android SDK $NEEDED_SDK"
+            echo "🔧 Auto-bump: MIN_ANDROID_SDK=${MIN_ANDROID_SDK:-37} → $NEEDED_SDK"
+
+            CURRENT="${MIN_ANDROID_SDK:-37}"
+            if [ "$NEEDED_SDK" -le "$CURRENT" ]; then
+              echo "⚠️  Sudah MIN_SDK=$CURRENT tapi masih minta $NEEDED_SDK."
+              echo "📋 Kemungkinan error bukan murni SDK."
+              bash /tmp/ci/report-errors.sh /tmp/build.log
+              exit "$STATUS"
+            fi
+
+            if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+              echo "❌ Sudah $MAX_ATTEMPTS attempt, menyerah."
+              bash /tmp/ci/report-errors.sh /tmp/build.log
+              exit "$STATUS"
+            fi
+
+            # ── Update env & sync ulang SDK ──────────────────────────
+            export MIN_ANDROID_SDK="$NEEDED_SDK"
+            if [ -n "${GITHUB_ENV:-}" ]; then
+              echo "MIN_ANDROID_SDK=$NEEDED_SDK" >> "$GITHUB_ENV"
+            fi
+            echo ""
+            echo "📥 Install & sinkron ulang SDK ke versi $NEEDED_SDK..."
+            bash /tmp/ci/sync-android-sdk.sh "$PROJECT"
+          done
+
+          echo "❌ Gagal setelah semua attempt"
+          exit 1
+          BUILD
+          chmod +x /tmp/ci/build-with-autobump.sh
 
           echo "✅ Scripts disiapkan"
 
@@ -551,7 +644,6 @@ jobs:
           DART_MAJOR=${{ steps.versions.outputs.dart_major }}
           FLUTTER_BASE=${{ steps.versions.outputs.flutter_base }}
 
-          # SDK constraint sesuai Dart base
           SDK_LINE="  sdk: \">=${DART_MAJOR}.0.0 <$((DART_MAJOR+1)).0.0\""
           awk -v new="$SDK_LINE" '
             /^environment:/ { print; in_env=1; injected=0; next }
@@ -561,11 +653,9 @@ jobs:
             END { if (in_env && !injected) print new }
           ' "$PUBSPEC" > "$PUBSPEC.tmp" && mv "$PUBSPEC.tmp" "$PUBSPEC"
 
-          # Semua dependency → "any" (biar tidak konflik versi)
           sed -i '/^[[:space:]]/s/: \^[0-9][0-9.]*$/: any/' "$PUBSPEC"
           sed -i '/^[[:space:]]/s/: [0-9][0-9.]*$/: any/'  "$PUBSPEC"
 
-          # dependency_overrides dasar
           if ! grep -q "^dependency_overrides:" "$PUBSPEC"; then
             {
               echo ""
@@ -574,6 +664,26 @@ jobs:
               echo "  plugin_platform_interface: any"
               echo "  flutter_plugin_android_lifecycle: any"
             } >> "$PUBSPEC"
+          fi
+
+          if [ -n "${PACKAGE_PINS:-}" ]; then
+            while IFS= read -r line; do
+              line=$(echo "$line" | sed 's/#.*//' | tr -d ' \r')
+              [ -z "$line" ] && continue
+              pkg="${line%%:*}"; ver="${line#*:}"
+              [ -z "$pkg" ] || [ -z "$ver" ] && continue
+              if grep -qE "^[[:space:]]+${pkg}:" "$PUBSPEC"; then
+                echo "  📌 pin $pkg → $ver"
+                if grep -qE "^  ${pkg}:" "$PUBSPEC"; then
+                  sed -i "s|^  ${pkg}:.*|  ${pkg}: ${ver}|" "$PUBSPEC"
+                else
+                  awk -v p="$pkg" -v v="$ver" '
+                    /^dependency_overrides:/ { print; print "  " p ": " v; next }
+                    { print }
+                  ' "$PUBSPEC" > "$PUBSPEC.tmp" && mv "$PUBSPEC.tmp" "$PUBSPEC"
+                fi
+              fi
+            done <<< "$PACKAGE_PINS"
           fi
 
           echo "✅ pubspec.yaml dinormalisasi"
@@ -600,29 +710,15 @@ jobs:
         working-directory: ${{ steps.root_zip.outputs.dir }}
         run: bash /tmp/ci/sync-android-sdk.sh "$PWD"
 
-      - name: "[ZIP] Build"
+      - name: "[ZIP] Build (with auto-bump SDK)"
         if: steps.parse.outputs.mode == 'zip'
         working-directory: ${{ steps.root_zip.outputs.dir }}
         run: |
-          set -o pipefail
-          OUTPUT="${{ steps.parse.outputs.output_type }}"
-          BUILD="${{ steps.parse.outputs.build_type }}"
-
-          echo "▶ flutter build $OUTPUT --$BUILD"
-          set +e
-          flutter build "$OUTPUT" "--$BUILD" \
-            --no-tree-shake-icons \
-            --android-skip-build-dependency-validation 2>&1 | tee /tmp/build.log
-          STATUS=${PIPESTATUS[0]}
-          set -e
-
-          if [ "$STATUS" -eq 0 ]; then
-            echo "✅ Build sukses"
-            exit 0
-          fi
-
-          bash /tmp/ci/report-errors.sh /tmp/build.log
-          exit "$STATUS"
+          bash /tmp/ci/build-with-autobump.sh \
+            "$PWD" \
+            "${{ steps.parse.outputs.output_type }}" \
+            "${{ steps.parse.outputs.build_type }}" \
+            3
 
       - name: "[ZIP] Upload artifact"
         if: steps.parse.outputs.mode == 'zip' && success()
@@ -742,25 +838,15 @@ jobs:
         working-directory: webview_project
         run: bash /tmp/ci/sync-android-sdk.sh "$PWD"
 
-      - name: "[URL] Build"
+      - name: "[URL] Build (with auto-bump SDK)"
         if: steps.parse.outputs.mode == 'url'
         working-directory: webview_project
         run: |
-          set -o pipefail
-          set +e
-          flutter build apk --release \
-            --no-tree-shake-icons \
-            --android-skip-build-dependency-validation 2>&1 | tee /tmp/build.log
-          STATUS=${PIPESTATUS[0]}
-          set -e
-
-          if [ "$STATUS" -eq 0 ]; then
-            echo "✅ Build sukses"
-            exit 0
-          fi
-
-          bash /tmp/ci/report-errors.sh /tmp/build.log
-          exit "$STATUS"
+          bash /tmp/ci/build-with-autobump.sh \
+            "$PWD" \
+            "apk" \
+            "release" \
+            3
 
       - name: "[URL] Upload artifact"
         if: steps.parse.outputs.mode == 'url' && success()

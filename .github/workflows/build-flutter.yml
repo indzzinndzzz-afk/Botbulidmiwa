@@ -515,4 +515,6 @@ jobs:
         if: steps.parse.outputs.mode == 'url'
         uses: actions/upload-artifact@v4
         with:
-          na
+          name: apk-${{ inputs.jobId }}
+          path: webview_project/build/app/outputs/flutter-apk/*.apk
+          retention-days: 1

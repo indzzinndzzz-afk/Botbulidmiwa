@@ -277,13 +277,21 @@ jobs:
             sed -i '/^[[:space:]]/s/: [0-9][0-9.]*$/: any/' "$PUBSPEC"
             
             # ── 3. Tambahkan dependency_overrides ──────────────────────
+            # PENTING: jangan override 'meta', 'collection', atau
+            # 'material_color_utilities'. Ketiganya dibundel & dikunci
+            # versinya oleh Flutter SDK sendiri, mengikuti source
+            # framework yang dipakai (mis. annotation @awaitNotRequired
+            # di viewport_offset.dart / animation_controller.dart perlu
+            # versi 'meta' tertentu). Memaksa 'any' pada paket-paket ini
+            # bisa membuat pub menarik versi yang lebih lama dan tidak
+            # kompatibel, sehingga kompilasi FRAMEWORK Flutter sendiri
+            # gagal dengan error "Not a constant expression".
+            # Override di sini hanya untuk plugin pihak ketiga yang
+            # memang sering bentrok versi antar-project template lama.
             if ! grep -q "^dependency_overrides:" "$PUBSPEC"; then
               echo "" >> "$PUBSPEC"
               echo "dependency_overrides:" >> "$PUBSPEC"
               echo "  # Mengikuti versi base Flutter $FLUTTER_BASE" >> "$PUBSPEC"
-              echo "  collection: any" >> "$PUBSPEC"
-              echo "  meta: any" >> "$PUBSPEC"
-              echo "  material_color_utilities: any" >> "$PUBSPEC"
               echo "  plugin_platform_interface: any" >> "$PUBSPEC"
               echo "  flutter_plugin_android_lifecycle: any" >> "$PUBSPEC"
             fi
@@ -423,3 +431,4 @@ jobs:
           name: apk-${{ inputs.jobId }}
           path: webview_project/build/app/outputs/flutter-apk/*.apk
           retention-days: 1
+          

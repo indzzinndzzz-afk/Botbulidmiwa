@@ -23,7 +23,6 @@ jobs:
     timeout-minutes: 60
 
     env:
-      # ── Baseline. Auto-bump akan naikkan otomatis kalau tersedia & dibutuhkan. ──
       MIN_ANDROID_SDK: "36"
       GRADLE_VERSION: "8.14.1"
       AGP_VERSION: "8.7.2"
@@ -140,7 +139,7 @@ jobs:
           fi
           log "🎛️  Flutter default compileSdk = ${FLUTTER_DEFAULT:-<unknown>}"
 
-          # ── 2. Scan literal compileSdk di app + plugin ──────────────
+          # ── 2. Scan literal compileSdk ───────────────────────────────
           ALL=$(mktemp); FOUND=$(mktemp)
           scan_file() {
             local f="$1" label="$2" vals
@@ -172,7 +171,7 @@ jobs:
 
           if [ "$MAX" -ge 37 ]; then
             if [ ! -d "$ANDROID_HOME/platforms/android-$MAX" ]; then
-              log "🔍 platforms;android-$MAX belum ada. Cek ketersediaan di channel..."
+              log "🔍 platforms;android-$MAX belum ada. Cek channel..."
               AVAIL=""
               for CHANNEL in "" "--channel=3" "--channel=2"; do
                 if "$SDKMANAGER" --sdk_root="$ANDROID_HOME" $CHANNEL --list 2>/dev/null \
@@ -182,9 +181,8 @@ jobs:
                   break
                 fi
               done
-
               if [ -z "$AVAIL" ]; then
-                log "⚠️  platforms;android-$MAX TIDAK TERSEDIA di channel manapun"
+                log "⚠️  platforms;android-$MAX TIDAK TERSEDIA"
                 MAX_AVAIL=$("$SDKMANAGER" --list 2>/dev/null \
                               | grep -oP 'platforms;android-\K\d+' | sort -n | tail -1)
                 MAX_AVAIL=${MAX_AVAIL:-$MIN_SDK}
@@ -195,7 +193,7 @@ jobs:
           fi
           log "🎯 Final compileSdk = $MAX"
 
-          # ── 4. Install platform kalau belum ada ──────────────────────
+          # ── 4. Install platform ──────────────────────────────────────
           if [ -d "$ANDROID_HOME/platforms/android-$MAX" ]; then
             log "✅ platforms;android-$MAX sudah ada"
           else
@@ -203,36 +201,22 @@ jobs:
             yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null 2>&1 || true
             INSTALLED=0
             for CHANNEL in "" "--channel=3" "--channel=2"; do
-              log "  → channel '$CHANNEL'"
               if "$SDKMANAGER" --sdk_root="$ANDROID_HOME" $CHANNEL "platforms;android-$MAX" \
                    >/tmp/sdkmgr.log 2>&1; then
-                INSTALLED=1
-                log "  ✅ Berhasil install platforms;android-$MAX"
-                break
+                INSTALLED=1; break
               fi
-              log "  ⚠️  Gagal: $(tail -1 /tmp/sdkmgr.log 2>/dev/null || echo 'no log')"
             done
-
-            if [ "$INSTALLED" -eq 0 ]; then
-              log "❌ Tidak bisa install platforms;android-$MAX — fallback ke $MIN_SDK"
-              MAX=$MIN_SDK
-              if [ ! -d "$ANDROID_HOME/platforms/android-$MAX" ]; then
-                "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "platforms;android-$MAX" >/dev/null 2>&1 || true
-              fi
-            fi
+            [ "$INSTALLED" -eq 0 ] && { log "❌ fallback ke $MIN_SDK"; MAX=$MIN_SDK; }
           fi
-          log "📦 Platforms tersedia:"; ls "$ANDROID_HOME/platforms" 2>/dev/null | sed 's/^/  - /'
+          log "📦 Platforms:"; ls "$ANDROID_HOME/platforms" 2>/dev/null | sed 's/^/  - /'
 
           # ── 5. gradle.properties ─────────────────────────────────────
           GP="$PROJECT_DIR/android/gradle.properties"
           mkdir -p "$(dirname "$GP")"; touch "$GP"
           set_prop() {
             local k="$1" v="$2"
-            if grep -q "^${k}=" "$GP"; then
-              sed -i -E "s|^${k}=.*|${k}=${v}|" "$GP"
-            else
-              echo "${k}=${v}" >> "$GP"
-            fi
+            if grep -q "^${k}=" "$GP"; then sed -i -E "s|^${k}=.*|${k}=${v}|" "$GP"
+            else echo "${k}=${v}" >> "$GP"; fi
           }
           set_prop "flutter.compileSdkVersion" "$MAX"
           set_prop "flutter.targetSdkVersion" "$MAX"
@@ -241,7 +225,7 @@ jobs:
           set_prop "org.gradle.jvmargs" "-Xmx4g -XX:MaxMetaspaceSize=1g"
           log "📝 gradle.properties → flutter.compileSdkVersion=$MAX"
 
-          # ── 6. Patch plugin ──────────────────────────────────────────
+          # ── 6. Patch compileSdk plugin ───────────────────────────────
           PATCHED=0
           for ROOT in "${CACHE_ROOTS[@]}"; do
             [ -d "$ROOT" ] || continue
@@ -258,27 +242,84 @@ jobs:
           done
           log "✅ Plugin dipatch: $PATCHED file"
 
-          # ── 7. Patch khusus: permission_handler_android ──────────────
-          # Plugin ini kadang pakai constant API 37 (Manifest.permission.ACCESS_LOCAL_NETWORK)
-          # yang tidak ada di SDK 36. Ganti jadi string literal — nilainya sama.
-          PERM_DIR=$(find "$HOME/.pub-cache/hosted/pub.dev" -maxdepth 1 \
-                       -name "permission_handler_android-*" -type d 2>/dev/null | head -1)
+          # ═════════════════════════════════════════════════════════════
+          # 7. PATCH KHUSUS: permission_handler_android
+          #    Handle constant API 37:
+          #      - Manifest.permission.ACCESS_LOCAL_NETWORK
+          #      - Build.VERSION_CODES.CINNAMON_BUN
+          #    Semua bentuk referensi di-handle:
+          #      Manifest.permission.X
+          #      android.Manifest.permission.X
+          #      permission.X (import static)
+          #      X (bare, dari import static)
+          # ═════════════════════════════════════════════════════════════
+          PERM_DIRS=$(find "$HOME/.pub-cache/hosted/pub.dev" -maxdepth 1 \
+                        -name "permission_handler_android-*" -type d 2>/dev/null || true)
 
-          if [ -n "$PERM_DIR" ]; then
-            log "🔧 Patch permission_handler_android → kompat SDK $MAX"
-            find "$PERM_DIR" -name "build.gradle*" -exec \
-              sed -i -E \
-                -e "s/(compileSdkVersion\s*=?\s*)[0-9]+/\1$MAX/g" \
-                -e "s/(compileSdk\s*=?\s*)[0-9]+/\1$MAX/g" \
-              {} \; 2>/dev/null || true
+          if [ -n "$PERM_DIRS" ]; then
+            for PERM_DIR in $PERM_DIRS; do
+              log "🔧 Patch permission_handler_android: $(basename "$PERM_DIR")"
 
-            if [ "$MAX" -lt 37 ]; then
-              find "$PERM_DIR" \( -name "*.kt" -o -name "*.java" \) -exec \
-                sed -i \
-                  's/Manifest\.permission\.ACCESS_LOCAL_NETWORK/"android.permission.ACCESS_LOCAL_NETWORK"/g' \
+              # Force compileSdk plugin
+              find "$PERM_DIR" -name "build.gradle*" -exec \
+                sed -i -E \
+                  -e "s/(compileSdkVersion\s*=?\s*)[0-9]+/\1$MAX/g" \
+                  -e "s/(compileSdk\s*=?\s*)[0-9]+/\1$MAX/g" \
                 {} \; 2>/dev/null || true
-              log "  ✅ ACCESS_LOCAL_NETWORK → string literal"
-            fi
+
+              if [ "$MAX" -lt 37 ]; then
+                FIXED=0
+                while IFS= read -r f; do
+                  # Skip file yang tidak punya constant bermasalah
+                  if ! grep -qE "ACCESS_LOCAL_NETWORK|CINNAMON_BUN" "$f" 2>/dev/null; then
+                    continue
+                  fi
+
+                  log "  🔧 Processing: $(basename "$f")"
+
+                  # ── A. Protect string literal yang sudah benar ──────
+                  perl -i -pe 's/"android\.permission\.ACCESS_LOCAL_NETWORK"/@@ALN_STR@@/g' "$f"
+
+                  # ── B. Hapus import static ACCESS_LOCAL_NETWORK ─────
+                  sed -i -E '/^[[:space:]]*import[[:space:]]+.*ACCESS_LOCAL_NETWORK[[:space:]]*;/d' "$f"
+
+                  # ── C. Replace ACCESS_LOCAL_NETWORK → string literal ─
+                  perl -i -pe '
+                    s/\bandroid\.Manifest\.permission\.ACCESS_LOCAL_NETWORK\b/"android.permission.ACCESS_LOCAL_NETWORK"/g;
+                    s/\bManifest\.permission\.ACCESS_LOCAL_NETWORK\b/"android.permission.ACCESS_LOCAL_NETWORK"/g;
+                    s/(?<![\w.])permission\.ACCESS_LOCAL_NETWORK\b/"android.permission.ACCESS_LOCAL_NETWORK"/g;
+                    s/(?<![\w."])ACCESS_LOCAL_NETWORK(?!")/"android.permission.ACCESS_LOCAL_NETWORK"/g;
+                  ' "$f"
+
+                  # ── D. Replace CINNAMON_BUN → 36 (API level Android 16) ─
+                  perl -i -pe '
+                    s/\bBuild\.VERSION_CODES\.CINNAMON_BUN\b/36/g;
+                    s/\bVERSION_CODES\.CINNAMON_BUN\b/36/g;
+                    s/(?<![\w."])CINNAMON_BUN(?!")/36/g;
+                  ' "$f"
+
+                  # ── E. Restore protected string ─────────────────────
+                  perl -i -pe 's/@@ALN_STR@@/"android.permission.ACCESS_LOCAL_NETWORK"/g' "$f"
+
+                  FIXED=$((FIXED+1))
+                  log "  ✓ Fixed: $(basename "$f")"
+                done < <(find "$PERM_DIR" \( -name "*.kt" -o -name "*.java" \) 2>/dev/null)
+
+                log "  ✅ Total file di-patch: $FIXED"
+
+                # ── Verifikasi hasil ────────────────────────────────
+                REMAINING=$(grep -rlE "Manifest\.permission\.ACCESS_LOCAL_NETWORK|VERSION_CODES\.CINNAMON_BUN|permission\.ACCESS_LOCAL_NETWORK" \
+                              "$PERM_DIR" 2>/dev/null | wc -l || echo 0)
+                if [ "$REMAINING" -gt 0 ]; then
+                  log "  ⚠️  Masih ada $REMAINING file yang belum ter-patch — cek manual"
+                  grep -rlE "ACCESS_LOCAL_NETWORK|CINNAMON_BUN" "$PERM_DIR" 2>/dev/null | sed 's/^/    /'
+                else
+                  log "  ✅ Semua referensi sudah di-replace"
+                fi
+              fi
+            done
+          else
+            log "ℹ️  permission_handler_android tidak ditemukan"
           fi
 
           # ── 8. Patch app ─────────────────────────────────────────────
@@ -416,7 +457,18 @@ jobs:
             [ -z "$NEEDED_SDK" ] && NEEDED_SDK=$(grep -oiP 'requires (?:compileSdk|SDK)(?: version)? \K\d+' /tmp/build.log | head -1 || true)
             [ -z "$NEEDED_SDK" ] && NEEDED_SDK=$(grep -oiP 'Failed to find Platform SDK with path: platforms;android-\K\d+' /tmp/build.log | head -1 || true)
 
+            # ── Kalau error karena symbol not found → re-sync & retry ──
+            SYMBOL_ERR=$(grep -cP 'cannot find symbol' /tmp/build.log 2>/dev/null || echo 0)
+
             if [ -z "$NEEDED_SDK" ]; then
+              if [ "$SYMBOL_ERR" -gt 0 ] && [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+                echo ""
+                echo "⚠️  Detected 'cannot find symbol' — coba re-sync plugin & retry"
+                echo "📋 Re-patching permission_handler_android..."
+                bash /tmp/ci/sync-android-sdk.sh "$PROJECT"
+                continue
+              fi
+
               echo ""
               echo "⚠️  Tidak bisa deteksi versi SDK dari log."
               bash /tmp/ci/report-errors.sh /tmp/build.log
@@ -443,7 +495,6 @@ jobs:
 
             if [ -z "$AVAIL" ]; then
               echo "⚠️  platforms;android-$NEEDED_SDK TIDAK TERSEDIA di channel manapun."
-              echo "📋 Kemungkinan plugin butuh SDK yang belum rilis untuk publik."
               echo "🔧 Sudah di-patch di sync-android-sdk.sh — tapi masih gagal."
               echo ""
               bash /tmp/ci/report-errors.sh /tmp/build.log

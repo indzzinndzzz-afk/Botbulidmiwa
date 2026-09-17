@@ -162,8 +162,13 @@ jobs:
 
               buildTypes {
                 release {
-                  isMinifyEnabled = false
+                  isMinifyEnabled = true
+                  isShrinkResources = true
                   signingConfig = signingConfigs.getByName("debug")
+                  proguardFiles(
+                    getDefaultProguardFile("proguard-android-optimize.txt"),
+                    "proguard-rules.pro"
+                  )
                 }
               }
             }
@@ -172,6 +177,9 @@ jobs:
               source = "../.."
             }
           EOF
+
+            # Pastikan proguard-rules.pro ada supaya proguardFiles() di atas tidak gagal
+            touch android/app/proguard-rules.pro
 
             # Suntikkan applicationId & namespace asli (heredoc di atas quoted, jadi aman disubstitusi belakangan)
             sed -i "s/__NAMESPACE__/${ORIG_NAMESPACE}/" android/app/build.gradle.kts

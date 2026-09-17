@@ -248,8 +248,29 @@ jobs:
             echo "🔍 Base Flutter: $FLUTTER_BASE"
             echo "🔍 Base Dart major: $DART_MAJOR"
             
-            # ── 1. SDK constraint mengikuti Dart base (hanya baris environment, jangan sentuh "sdk: flutter") ──
-            sed -i "/sdk: *['\"]/s/sdk:.*/sdk: \">=${DART_MAJOR}.0.0 <$((DART_MAJOR+1)).0.0\"/" "$PUBSPEC"
+            # ── 1. SDK constraint mengikuti Dart base ──────────────────────
+            # DIPERBAIKI: sed lama cuma match kalau baris sdk: PERSIS diikuti
+            # tanda kutip nempel (sdk: '...' / sdk: "..."). Kalau project
+            # nulis constraint-nya dengan format lain (spasi beda, gak ada
+            # kutip, dsb) sed lama diem aja & lower-bound yang rusak lolos ke
+            # tahap build -> "Failed to update packages, exit code 65".
+            # Versi baru ini pakai awk yang beneran ngerti "lagi di dalam
+            # blok environment:", jadi PASTI ke-replace apapun format
+            # aslinya, dan gak akan salah kena baris "sdk: flutter" di
+            # dependencies: (karena itu di luar blok environment).
+            SDK_LINE="  sdk: \">=${DART_MAJOR}.0.0 <$((DART_MAJOR+1)).0.0\""
+            awk -v new="$SDK_LINE" '
+              /^environment:/ { print; in_env=1; injected=0; next }
+              in_env && /^[^[:space:]]/ {
+                if (!injected) print new
+                in_env=0
+              }
+              in_env && /sdk[[:space:]]*:/ { print new; injected=1; next }
+              { print }
+              END { if (in_env && !injected) print new }
+            ' "$PUBSPEC" > "$PUBSPEC.tmp" && mv "$PUBSPEC.tmp" "$PUBSPEC"
+            
+            echo "🔧 environment.sdk sekarang: $(grep -A2 '^environment:' "$PUBSPEC" | grep 'sdk:')"
             
             # ── 2. Semua dependency jadi 'any' (hanya baris terindentasi, jangan sentuh top-level 'version:') ──
             sed -i '/^[[:space:]]/s/: \^[0-9][0-9.]*$/: any/' "$PUBSPEC"

@@ -10,10 +10,9 @@ on:
         description: "ID user (dari backend)"
         required: true
       payload:
-        description: "JSON payload {mode,url,buildType,appName,iconUrl,flutterVersion}"
+        description: "JSON payload {mode,url,buildType,appName,iconUrl,flutterVersion,outputType}"
         required: true
 
-# Cegah spam: 1 user cuma boleh 1 build jalan bersamaan
 concurrency:
   group: build-${{ github.event.inputs.userId }}
   cancel-in-progress: false
@@ -24,30 +23,30 @@ jobs:
     timeout-minutes: 60
 
     env:
-      # ── Baseline long-term. Naikkan kalau Flutter SDK baru butuh lebih. ──
       MIN_ANDROID_SDK: "36"
       GRADLE_VERSION: "8.14.1"
       AGP_VERSION: "8.7.2"
       KOTLIN_VERSION: "2.0.20"
+      # ── Pin paket yang TIDAK ingin auto-migrate (opsional) ──────────
+      # font_awesome_flutter sengaja TIDAK di-pin → pakai v11 + auto-migrate
+      PACKAGE_PINS: |
+        # tambahkan paket lain di sini jika perlu, contoh:
+        # some_legacy_pkg:^2.0.0
 
     steps:
       # ═════════════════════════════════════════════════════════════════════
-      # 1. PARSE PAYLOAD + VALIDASI
+      # 1. PARSE PAYLOAD
       # ═════════════════════════════════════════════════════════════════════
       - name: Parse payload
         id: parse
         run: |
           set -euo pipefail
-
           echo '${{ inputs.payload }}' > payload.json
 
-          # Validasi JSON minimal
           if ! jq empty payload.json 2>/dev/null; then
-            echo "❌ payload bukan JSON valid"
-            exit 1
+            echo "❌ payload bukan JSON valid"; exit 1
           fi
 
-          # Ambil nilai + default
           MODE=$(jq -r '.mode // "zip"' payload.json)
           URL=$(jq -r '.url // ""' payload.json)
           BUILD_TYPE=$(jq -r '.buildType // "release"' payload.json)
@@ -56,37 +55,18 @@ jobs:
           FLUTTER_VER=$(jq -r '.flutterVersion // "stable"' payload.json)
           OUTPUT_TYPE=$(jq -r '.outputType // "apk"' payload.json)
 
-          # Sanitasi appName → hanya alfanumerik + spasi + - _ . (max 40 char)
           APP_NAME_SAFE=$(echo "$APP_NAME" \
             | tr -d '\n\r' \
             | sed -E 's/[^A-Za-z0-9 _.\-]//g' \
             | cut -c1-40)
           [ -z "$APP_NAME_SAFE" ] && APP_NAME_SAFE="MyApp"
-
-          # Sanitasi nama artifact (tanpa spasi, max 30 char)
           ARTIFACT_NAME=$(echo "$APP_NAME_SAFE" | tr ' ' '_' | cut -c1-30)
 
-          # Validasi mode
-          case "$MODE" in
-            zip|url) ;;
-            *) echo "❌ mode tidak dikenal: $MODE"; exit 1 ;;
-          esac
-
-          # Validasi URL
+          case "$MODE" in zip|url) ;; *) echo "❌ mode tidak dikenal: $MODE"; exit 1 ;; esac
           [ -z "$URL" ] && { echo "❌ url kosong"; exit 1; }
           echo "$URL" | grep -qE '^https?://' || { echo "❌ url bukan http(s)"; exit 1; }
-
-          # Validasi build type
-          case "$BUILD_TYPE" in
-            release|debug|profile) ;;
-            *) BUILD_TYPE="release" ;;
-          esac
-
-          # Validasi output type
-          case "$OUTPUT_TYPE" in
-            apk|appbundle|aab) ;;
-            *) OUTPUT_TYPE="apk" ;;
-          esac
+          case "$BUILD_TYPE" in release|debug|profile) ;; *) BUILD_TYPE="release" ;; esac
+          case "$OUTPUT_TYPE" in apk|appbundle|aab) ;; *) OUTPUT_TYPE="apk" ;; esac
           [ "$OUTPUT_TYPE" = "aab" ] && OUTPUT_TYPE="appbundle"
 
           {
@@ -124,146 +104,89 @@ jobs:
           DART_VER=$(dart --version 2>&1 | grep -oP '\d+\.\d+\.\d+' || echo "0.0.0")
           DART_MAJOR=$(echo "$DART_VER" | cut -d. -f1)
           FLUTTER_BASE=$(echo "$FLUTTER_VER" | cut -d. -f1-2)
-
           {
             echo "flutter_version=$FLUTTER_VER"
             echo "dart_version=$DART_VER"
             echo "dart_major=$DART_MAJOR"
             echo "flutter_base=$FLUTTER_BASE"
           } >> $GITHUB_OUTPUT
-
-          echo "🔍 Flutter $FLUTTER_VER (base $FLUTTER_BASE) / Dart $DART_VER"
+          echo "🔍 Flutter $FLUTTER_VER / Dart $DART_VER"
 
       # ═════════════════════════════════════════════════════════════════════
-      # 3. TULIS SCRIPT SYNC ANDROID SDK (universal)
+      # 3. PREPARE SCRIPTS
       # ═════════════════════════════════════════════════════════════════════
       - name: Prepare universal scripts
         run: |
           mkdir -p /tmp/ci
 
-          # ─────────────────────────────────────────────────────────────
-          # sync-android-sdk.sh — deteksi & samakan compileSdk
-          # ─────────────────────────────────────────────────────────────
+          # ── sync-android-sdk.sh ─────────────────────────────────────
           cat > /tmp/ci/sync-android-sdk.sh << 'SYNC'
           #!/usr/bin/env bash
           set -uo pipefail
-
           PROJECT_DIR="${1:-.}"
           MIN_SDK="${MIN_ANDROID_SDK:-36}"
-
           log() { echo "[$(date +%H:%M:%S)] $*"; }
-          log "════════════════════════════════════════════════════════════════"
-          log "📂 Project : $PROJECT_DIR"
-          log "🧱 MIN_SDK : $MIN_SDK"
-          log "════════════════════════════════════════════════════════════════"
+          log "📂 Project: $PROJECT_DIR | MIN_SDK: $MIN_SDK"
 
-          # ── 1. Baca default compileSdk dari Flutter SDK ───────────────
           FLUTTER_BIN=$(command -v flutter || true)
           FLUTTER_ROOT="${FLUTTER_ROOT:-}"
           if [ -z "$FLUTTER_ROOT" ] && [ -n "$FLUTTER_BIN" ]; then
             FLUTTER_ROOT=$(dirname "$(dirname "$(readlink -f "$FLUTTER_BIN")")")
           fi
-
           FLUTTER_DEFAULT=""
           if [ -n "$FLUTTER_ROOT" ] && [ -d "$FLUTTER_ROOT/packages/flutter_tools/gradle" ]; then
-            FLUTTER_DEFAULT=$(grep -rhoP \
-              'compileSdkVersion\s*(:\s*Int)?\s*[=:]\s*\K[0-9]+' \
-              "$FLUTTER_ROOT/packages/flutter_tools/gradle/" 2>/dev/null \
-              | sort -n | tail -1 || true)
+            FLUTTER_DEFAULT=$(grep -rhoP 'compileSdkVersion\s*(:\s*Int)?\s*[=:]\s*\K[0-9]+' \
+              "$FLUTTER_ROOT/packages/flutter_tools/gradle/" 2>/dev/null | sort -n | tail -1 || true)
           fi
           log "🎛️  Flutter default compileSdk = ${FLUTTER_DEFAULT:-<unknown>}"
 
-          # ── 2. Scan literal di app + plugin ──────────────────────────
-          ALL=$(mktemp)
-          FOUND=$(mktemp)
-
+          ALL=$(mktemp); FOUND=$(mktemp)
           scan_file() {
-            local f="$1" label="$2"
-            local vals
+            local f="$1" label="$2" vals
             vals=$(grep -oP 'compileSdk(Version)?\s*=?\s*\K[0-9]+' "$f" 2>/dev/null || true)
-            for v in $vals; do
-              echo "$v" >> "$ALL"
-              echo "  • $label → $v" >> "$FOUND"
-            done
+            for v in $vals; do echo "$v" >> "$ALL"; echo "  • $label → $v" >> "$FOUND"; done
           }
-
-          for f in "$PROJECT_DIR/android/app/build.gradle" \
-                   "$PROJECT_DIR/android/app/build.gradle.kts"; do
+          for f in "$PROJECT_DIR/android/app/build.gradle" "$PROJECT_DIR/android/app/build.gradle.kts"; do
             [ -f "$f" ] && scan_file "$f" "app"
           done
-
-          CACHE_ROOTS=(
-            "$HOME/.pub-cache/hosted/pub.dev"
-            "$HOME/.pub-cache/git"
-            "$PUB_CACHE/hosted/pub.dev"
-          )
-
+          CACHE_ROOTS=("$HOME/.pub-cache/hosted/pub.dev" "$HOME/.pub-cache/git" "$PUB_CACHE/hosted/pub.dev")
           for ROOT in "${CACHE_ROOTS[@]}"; do
             [ -d "$ROOT" ] || continue
             log "🔍 Scanning: $ROOT"
             while IFS= read -r f; do
               PKG=$(echo "$f" | sed -E "s|.*/(pub\.dev|git)/||; s|/android/.*||")
               scan_file "$f" "$PKG"
-            done < <(find "$ROOT" -maxdepth 8 \
-                          \( -name build.gradle -o -name build.gradle.kts \) \
-                          -path '*/android/*' 2>/dev/null)
+            done < <(find "$ROOT" -maxdepth 8 \( -name build.gradle -o -name build.gradle.kts \) -path '*/android/*' 2>/dev/null)
           done
+          log "📋 compileSdk ditemukan:"; [ -s "$FOUND" ] && cat "$FOUND" || log "  (tidak ada literal)"
 
-          log "📋 compileSdk ditemukan:"
-          [ -s "$FOUND" ] && cat "$FOUND" || log "  (tidak ada literal — semua pakai flutter.compileSdkVersion)"
-
-          # ── 3. MAX = max(literal, Flutter default, MIN_SDK) ──────────
-          MAX=$( { cat "$ALL" 2>/dev/null
-                   echo "$MIN_SDK"
-                   echo "${FLUTTER_DEFAULT:-$MIN_SDK}"
-                 } | sort -n | tail -1 )
+          MAX=$( { cat "$ALL" 2>/dev/null; echo "$MIN_SDK"; echo "${FLUTTER_DEFAULT:-$MIN_SDK}"; } | sort -n | tail -1 )
           [ -z "$MAX" ] && MAX=$MIN_SDK
-          log "🎯 Target compileSdk (MAX) = $MAX"
+          log "🎯 Target compileSdk = $MAX"
 
-          # ── 4. Install platform kalau belum ada ──────────────────────
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          [ -x "$SDKMANAGER" ] || \
-            SDKMANAGER="$(find "$ANDROID_HOME" -name sdkmanager -type f 2>/dev/null | head -1)"
-
+          [ -x "$SDKMANAGER" ] || SDKMANAGER="$(find "$ANDROID_HOME" -name sdkmanager -type f 2>/dev/null | head -1)"
           if [ -d "$ANDROID_HOME/platforms/android-$MAX" ]; then
             log "✅ platforms;android-$MAX sudah ada"
           else
-            log "📥 Install platforms;android-$MAX (stable)..."
+            log "📥 Install platforms;android-$MAX ..."
             yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-
             INSTALLED=0
             for CHANNEL in "" "--channel=3" "--channel=2"; do
-              if "$SDKMANAGER" $CHANNEL "platforms;android-$MAX" >/tmp/sdkmgr.log 2>&1; then
-                INSTALLED=1
-                break
-              fi
-              log "⚠️  channel '$CHANNEL' gagal, coba berikutnya"
+              if "$SDKMANAGER" $CHANNEL "platforms;android-$MAX" >/tmp/sdkmgr.log 2>&1; then INSTALLED=1; break; fi
             done
-
             if [ "$INSTALLED" -eq 0 ]; then
-              log "❌ Tidak bisa install platforms;android-$MAX"
-              log "   Fallback ke $MIN_SDK (mungkin ada warning tapi build tetap lanjut)"
-              MAX=$MIN_SDK
-              if [ ! -d "$ANDROID_HOME/platforms/android-$MAX" ]; then
-                "$SDKMANAGER" "platforms;android-$MAX" >/dev/null 2>&1 || true
-              fi
+              log "⚠️  Fallback ke $MIN_SDK"; MAX=$MIN_SDK
             fi
           fi
-          log "📦 Platforms tersedia:"; ls "$ANDROID_HOME/platforms" 2>/dev/null | sed 's/^/  - /'
+          log "📦 Platforms:"; ls "$ANDROID_HOME/platforms" 2>/dev/null | sed 's/^/  - /'
 
-          # ── 5. Tulis gradle.properties (untuk plugin yang pakai var) ─
           GP="$PROJECT_DIR/android/gradle.properties"
           mkdir -p "$(dirname "$GP")"; touch "$GP"
-
           set_prop() {
             local k="$1" v="$2"
-            if grep -q "^${k}=" "$GP"; then
-              sed -i -E "s|^${k}=.*|${k}=${v}|" "$GP"
-            else
-              echo "${k}=${v}" >> "$GP"
-            fi
+            if grep -q "^${k}=" "$GP"; then sed -i -E "s|^${k}=.*|${k}=${v}|" "$GP"; else echo "${k}=${v}" >> "$GP"; fi
           }
-
           set_prop "flutter.compileSdkVersion" "$MAX"
           set_prop "flutter.targetSdkVersion" "$MAX"
           set_prop "android.useAndroidX" "true"
@@ -271,75 +194,42 @@ jobs:
           set_prop "org.gradle.jvmargs" "-Xmx4g -XX:MaxMetaspaceSize=1g"
           log "📝 gradle.properties → flutter.compileSdkVersion=$MAX"
 
-          # ── 6. Patch plugin ──────────────────────────────────────────
           PATCHED=0
           for ROOT in "${CACHE_ROOTS[@]}"; do
             [ -d "$ROOT" ] || continue
             while IFS= read -r f; do
-              if sed -i -E \
-                -e "s/(compileSdkVersion\s*=?\s*)[0-9]+/\1$MAX/g" \
-                -e "s/(compileSdk\s*=?\s*)[0-9]+/\1$MAX/g" \
-                "$f" 2>/dev/null; then
+              if sed -i -E -e "s/(compileSdkVersion\s*=?\s*)[0-9]+/\1$MAX/g" -e "s/(compileSdk\s*=?\s*)[0-9]+/\1$MAX/g" "$f" 2>/dev/null; then
                 PATCHED=$((PATCHED+1))
               fi
-            done < <(find "$ROOT" -maxdepth 8 \
-                          \( -name build.gradle -o -name build.gradle.kts \) \
-                          -path '*/android/*' 2>/dev/null)
+            done < <(find "$ROOT" -maxdepth 8 \( -name build.gradle -o -name build.gradle.kts \) -path '*/android/*' 2>/dev/null)
           done
           log "✅ Plugin dipatch: $PATCHED file"
 
-          # ── 7. Patch app ─────────────────────────────────────────────
-          if [ -f "$PROJECT_DIR/android/app/build.gradle.kts" ]; then
-            sed -i -E \
-              -e "s/(compileSdk\s*=\s*)[0-9]+/\1$MAX/g" \
-              -e "s/(targetSdk\s*=\s*)[0-9]+/\1$MAX/g" \
+          [ -f "$PROJECT_DIR/android/app/build.gradle.kts" ] && \
+            sed -i -E -e "s/(compileSdk\s*=\s*)[0-9]+/\1$MAX/g" -e "s/(targetSdk\s*=\s*)[0-9]+/\1$MAX/g" \
               "$PROJECT_DIR/android/app/build.gradle.kts"
-          fi
-          if [ -f "$PROJECT_DIR/android/app/build.gradle" ]; then
-            sed -i -E \
-              -e "s/(compileSdkVersion\s*=?\s*)[0-9]+/\1$MAX/g" \
-              -e "s/(targetSdkVersion\s*=?\s*)[0-9]+/\1$MAX/g" \
+          [ -f "$PROJECT_DIR/android/app/build.gradle" ] && \
+            sed -i -E -e "s/(compileSdkVersion\s*=?\s*)[0-9]+/\1$MAX/g" -e "s/(targetSdkVersion\s*=?\s*)[0-9]+/\1$MAX/g" \
               "$PROJECT_DIR/android/app/build.gradle"
-          fi
 
-          log "════════════════════════════════════════════════════════════════"
           log "🎉 Sync selesai. Semua compileSdk → $MAX"
-          log "════════════════════════════════════════════════════════════════"
-
-          # Simpan MAX ke file supaya step lain bisa baca
           echo "$MAX" > /tmp/ci/compile_sdk.txt
           SYNC
           chmod +x /tmp/ci/sync-android-sdk.sh
 
-          # ─────────────────────────────────────────────────────────────
-          # rename-icons.sh — bikin ikon app dari 1 gambar
-          # ─────────────────────────────────────────────────────────────
+          # ── rename-icons.sh ─────────────────────────────────────────
           cat > /tmp/ci/rename-icons.sh << 'ICON'
           #!/usr/bin/env bash
           set -euo pipefail
-
           SRC="${1:?source icon required}"
           PROJECT="${2:?project dir required}"
-
-          command -v convert >/dev/null || {
-            sudo apt-get update -qq
-            sudo apt-get install -y imagemagick -qq
-          }
-
-          declare -A SIZES=(
-            [mipmap-mdpi]=48
-            [mipmap-hdpi]=72
-            [mipmap-xhdpi]=96
-            [mipmap-xxhdpi]=144
-            [mipmap-xxxhdpi]=192
-          )
-
+          command -v convert >/dev/null || { sudo apt-get update -qq; sudo apt-get install -y imagemagick -qq; }
+          declare -A SIZES=([mipmap-mdpi]=48 [mipmap-hdpi]=72 [mipmap-xhdpi]=96 [mipmap-xxhdpi]=144 [mipmap-xxxhdpi]=192)
           for dir in "${!SIZES[@]}"; do
             size=${SIZES[$dir]}
             target="$PROJECT/android/app/src/main/res/$dir"
             mkdir -p "$target"
-            convert "$SRC" -resize "${size}x${size}^" -gravity center \
-                    -extent "${size}x${size}" "$target/ic_launcher.png"
+            convert "$SRC" -resize "${size}x${size}^" -gravity center -extent "${size}x${size}" "$target/ic_launcher.png"
             echo "  ✓ $dir → ${size}x${size}"
           done
           echo "✅ Ikon diterapkan"
@@ -349,7 +239,7 @@ jobs:
           echo "✅ Scripts disiapkan"
 
       # ═════════════════════════════════════════════════════════════════════
-      # 4. MODE ZIP — project upload user
+      # 4. MODE ZIP
       # ═════════════════════════════════════════════════════════════════════
       - name: "[ZIP] Download & extract"
         if: steps.parse.outputs.mode == 'zip'
@@ -357,14 +247,9 @@ jobs:
           set -euo pipefail
           wget --timeout=180 --tries=3 -q -O project.zip "${{ steps.parse.outputs.url }}"
           unzip -q project.zip -d project
-
-          # Kalau hasil extract cuma 1 folder, jadikan root
           if [ "$(ls -1 project | wc -l)" -eq 1 ] && [ -d "project/$(ls -1 project)" ]; then
-            mv "project/$(ls -1 project)" project_tmp
-            rm -rf project
-            mv project_tmp project
+            mv "project/$(ls -1 project)" project_tmp; rm -rf project; mv project_tmp project
           fi
-
           echo "📂 Isi project:"; ls -la project | head -20
 
       - name: "[ZIP] Find Flutter root"
@@ -373,8 +258,7 @@ jobs:
         run: |
           DIR=$(find project -name "pubspec.yaml" -maxdepth 5 -not -path "*/.*" | head -1 | xargs dirname)
           if [ -z "$DIR" ] || [ ! -f "$DIR/pubspec.yaml" ]; then
-            echo "❌ pubspec.yaml tidak ditemukan"
-            exit 1
+            echo "❌ pubspec.yaml tidak ditemukan"; exit 1
           fi
           echo "dir=$DIR" >> $GITHUB_OUTPUT
           echo "📂 Flutter root: $DIR"
@@ -384,14 +268,11 @@ jobs:
         working-directory: ${{ steps.root_zip.outputs.dir }}
         run: |
           set -euo pipefail
-
-          # Pastikan folder android/ ada
           if [ ! -d "android" ]; then
             echo "⚠️  Folder android/ tidak ada — generate ulang"
             flutter create --platforms=android --project-name "$(basename $PWD)" .
           fi
 
-          # ── Gradle wrapper → versi target ────────────────────────────
           WRAPPER="android/gradle/wrapper/gradle-wrapper.properties"
           mkdir -p "$(dirname "$WRAPPER")"
           cat > "$WRAPPER" << EOF
@@ -403,29 +284,22 @@ jobs:
           EOF
           echo "✅ Gradle → $GRADLE_VERSION"
 
-          # ── Ambil applicationId & namespace asli ─────────────────────
-          ORIG_APP_ID=""
-          ORIG_NAMESPACE=""
-
+          ORIG_APP_ID=""; ORIG_NAMESPACE=""
           for f in android/app/build.gradle.kts android/app/build.gradle; do
             [ -f "$f" ] || continue
             ORIG_APP_ID=$(grep -oP '(?<=applicationId\s[=\s])[^\s"]+' "$f" | tr -d '"' | head -1 || true)
             ORIG_NAMESPACE=$(grep -oP '(?<=namespace\s[=\s])[^\s"]+' "$f" | tr -d '"' | head -1 || true)
             [ -n "$ORIG_APP_ID" ] && break
           done
-
           if [ -z "$ORIG_APP_ID" ] && [ -f "android/app/src/main/AndroidManifest.xml" ]; then
             ORIG_APP_ID=$(grep -oP '(?<=package=")[^"]+' android/app/src/main/AndroidManifest.xml | head -1 || true)
           fi
-
           ORIG_APP_ID=${ORIG_APP_ID:-com.example.app}
           ORIG_NAMESPACE=${ORIG_NAMESPACE:-$ORIG_APP_ID}
-
           echo "📦 applicationId = $ORIG_APP_ID"
           echo "📦 namespace     = $ORIG_NAMESPACE"
           echo "APP_ID=$ORIG_APP_ID" >> $GITHUB_ENV
 
-          # ── Tulis ulang build.gradle.kts ─────────────────────────────
           if [ -f "android/app/build.gradle.kts" ] || [ ! -f "android/app/build.gradle" ]; then
             cat > android/build.gradle.kts << 'EOF'
           allprojects {
@@ -493,13 +367,11 @@ jobs:
             source = "../.."
           }
           EOF
-
             touch android/app/proguard-rules.pro
             rm -f android/app/build.gradle
-            echo "✅ Kotlin DSL ditulis (pakai flutter.compileSdkVersion)"
+            echo "✅ Kotlin DSL ditulis"
           fi
 
-          # ── Tulis ulang build.gradle (Groovy) ────────────────────────
           if [ -f "android/app/build.gradle" ] && [ ! -f "android/app/build.gradle.kts" ]; then
             cat > android/build.gradle << EOF
           buildscript {
@@ -585,20 +457,17 @@ jobs:
             source '../..'
           }
           EOF
-
             touch android/app/proguard-rules.pro
             rm -f android/app/build.gradle.kts
-            echo "✅ Groovy DSL ditulis (pakai flutter.compileSdkVersion)"
+            echo "✅ Groovy DSL ditulis"
           fi
 
-          # ── Patch AndroidManifest ────────────────────────────────────
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST" ]; then
             APP_NAME="${{ steps.parse.outputs.app_name }}"
-            # Escape &, <, > untuk XML
             APP_NAME_XML=$(echo "$APP_NAME" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
             sed -i "s|android:label=\"[^\"]*\"|android:label=\"${APP_NAME_XML}\"|" "$MANIFEST"
-            echo "✅ AndroidManifest label → $APP_NAME"
+            echo "✅ Manifest label → $APP_NAME"
           fi
 
       - name: "[ZIP] Apply custom icon"
@@ -613,12 +482,70 @@ jobs:
           }
           bash /tmp/ci/rename-icons.sh /tmp/icon_raw "$PWD"
 
-      - name: "[ZIP] Normalize pubspec.yaml"
+      # ═════════════════════════════════════════════════════════════════════
+      # 4.5. AUTO-MIGRATE font_awesome_flutter → v11
+      # ═════════════════════════════════════════════════════════════════════
+      - name: "[ZIP] Auto-migrate font_awesome_flutter to v11"
         if: steps.parse.outputs.mode == 'zip'
         working-directory: ${{ steps.root_zip.outputs.dir }}
         run: |
           set -euo pipefail
 
+          if ! grep -qE '^\s*font_awesome_flutter\s*:' pubspec.yaml 2>/dev/null; then
+            echo "⏭️  Project tidak pakai font_awesome_flutter, skip"
+            exit 0
+          fi
+
+          echo "🔧 Migrasi font_awesome_flutter → v11..."
+          CHANGED=0
+
+          # 1. Icon(FontAwesomeIcons.*) → FaIcon(FontAwesomeIcons.*)
+          while IFS= read -r f; do
+            if grep -qP '(?<![A-Za-z])Icon\s*\(\s*FontAwesomeIcons\.' "$f" 2>/dev/null; then
+              perl -i -pe 's/(?<![A-Za-z])Icon\s*\(\s*FontAwesomeIcons\./FaIcon(FontAwesomeIcons./g' "$f"
+              echo "  ✓ Icon() → FaIcon(): $f"
+              CHANGED=$((CHANGED+1))
+            fi
+          done < <(find lib test -name '*.dart' 2>/dev/null || true)
+
+          # 2. find.byIcon(FontAwesomeIcons.x) → find.byIcon(FontAwesomeIcons.x.data)
+          while IFS= read -r f; do
+            if grep -qP 'byIcon\s*\(\s*FontAwesomeIcons\.\w+\s*\)' "$f" 2>/dev/null; then
+              perl -i -pe 's/byIcon\s*\(\s*(FontAwesomeIcons\.\w+)\s*\)/byIcon($1.data)/g' "$f"
+              echo "  ✓ find.byIcon() → .data: $f"
+              CHANGED=$((CHANGED+1))
+            fi
+          done < <(find lib test -name '*.dart' 2>/dev/null || true)
+
+          # 3. IconData x = FontAwesomeIcons.y; → x = FontAwesomeIcons.y.data;
+          while IFS= read -r f; do
+            if grep -qP 'IconData\??\s+\w+\s*=\s*FontAwesomeIcons\.\w+\s*;' "$f" 2>/dev/null; then
+              perl -i -pe 's/(IconData\??\s+\w+\s*=\s*FontAwesomeIcons\.\w+)(\s*;)/$1.data$2/g' "$f"
+              echo "  ✓ IconData = FontAwesomeIcons.x → .data: $f"
+              CHANGED=$((CHANGED+1))
+            fi
+          done < <(find lib test -name '*.dart' 2>/dev/null || true)
+
+          # 4. Rapikan .data.data (idempotent)
+          while IFS= read -r f; do
+            if grep -qP '\.data\.data' "$f" 2>/dev/null; then
+              perl -i -pe 's/\.data\.data/.data/g' "$f"
+            fi
+          done < <(find lib test -name '*.dart' 2>/dev/null || true)
+
+          if [ "$CHANGED" -eq 0 ]; then
+            echo "✅ Tidak ada pola v10 (project sudah v11-compatible)"
+          else
+            echo "✅ $CHANGED file di-migrasi ke v11"
+          fi
+          echo "── Cuplikan hasil ──"
+          grep -rn 'FaIcon' lib test 2>/dev/null | head -5 || true
+
+      - name: "[ZIP] Normalize pubspec.yaml"
+        if: steps.parse.outputs.mode == 'zip'
+        working-directory: ${{ steps.root_zip.outputs.dir }}
+        run: |
+          set -euo pipefail
           PUBSPEC="pubspec.yaml"
           [ -f "$PUBSPEC" ] || { echo "❌ pubspec.yaml hilang"; exit 1; }
           cp "$PUBSPEC" "$PUBSPEC.orig"
@@ -626,24 +553,18 @@ jobs:
           DART_MAJOR=${{ steps.versions.outputs.dart_major }}
           FLUTTER_BASE=${{ steps.versions.outputs.flutter_base }}
 
-          # ── SDK constraint ───────────────────────────────────────────
           SDK_LINE="  sdk: \">=${DART_MAJOR}.0.0 <$((DART_MAJOR+1)).0.0\""
           awk -v new="$SDK_LINE" '
             /^environment:/ { print; in_env=1; injected=0; next }
-            in_env && /^[^[:space:]]/ {
-              if (!injected) print new
-              in_env=0
-            }
+            in_env && /^[^[:space:]]/ { if (!injected) print new; in_env=0 }
             in_env && /sdk[[:space:]]*:/ { print new; injected=1; next }
             { print }
             END { if (in_env && !injected) print new }
           ' "$PUBSPEC" > "$PUBSPEC.tmp" && mv "$PUBSPEC.tmp" "$PUBSPEC"
 
-          # ── Semua dependency → "any" (aman dari konflik versi) ──────
           sed -i '/^[[:space:]]/s/: \^[0-9][0-9.]*$/: any/' "$PUBSPEC"
           sed -i '/^[[:space:]]/s/: [0-9][0-9.]*$/: any/'  "$PUBSPEC"
 
-          # ── dependency_overrides (hanya paket yang aman) ─────────────
           if ! grep -q "^dependency_overrides:" "$PUBSPEC"; then
             {
               echo ""
@@ -654,6 +575,27 @@ jobs:
             } >> "$PUBSPEC"
           fi
 
+          # Terapkan PACKAGE_PINS (kalau ada)
+          if [ -n "${PACKAGE_PINS:-}" ]; then
+            while IFS= read -r line; do
+              line=$(echo "$line" | sed 's/#.*//' | tr -d ' \r')
+              [ -z "$line" ] && continue
+              pkg="${line%%:*}"; ver="${line#*:}"
+              [ -z "$pkg" ] || [ -z "$ver" ] && continue
+              if grep -qE "^[[:space:]]+${pkg}:" "$PUBSPEC"; then
+                echo "  📌 pin $pkg → $ver"
+                if grep -qE "^  ${pkg}:" "$PUBSPEC"; then
+                  sed -i "s|^  ${pkg}:.*|  ${pkg}: ${ver}|" "$PUBSPEC"
+                else
+                  awk -v p="$pkg" -v v="$ver" '
+                    /^dependency_overrides:/ { print; print "  " p ": " v; next }
+                    { print }
+                  ' "$PUBSPEC" > "$PUBSPEC.tmp" && mv "$PUBSPEC.tmp" "$PUBSPEC"
+                fi
+              fi
+            done <<< "$PACKAGE_PINS"
+          fi
+
           echo "✅ pubspec.yaml dinormalisasi"
 
       - name: "[ZIP] Clean lockfile & pub get"
@@ -661,24 +603,17 @@ jobs:
         working-directory: ${{ steps.root_zip.outputs.dir }}
         run: |
           rm -f pubspec.lock
-
           run_pub() {
-            local desc="$1"; shift
-            echo "▶ $desc"
-            if timeout 300 "$@"; then
-              echo "✅ $desc berhasil"
-              return 0
-            fi
-            echo "⚠️  $desc gagal"
-            return 1
+            local d="$1"; shift
+            echo "▶ $d"
+            if timeout 300 "$@"; then echo "✅ $d berhasil"; return 0; fi
+            echo "⚠️  $d gagal"; return 1
           }
-
-          run_pub "flutter pub get"            flutter pub get && exit 0 || true
-          run_pub "flutter pub upgrade"        flutter pub upgrade && exit 0 || true
-          run_pub "pub upgrade --major"        flutter pub upgrade --major-versions && exit 0 || true
-          run_pub "pub get --offline"          flutter pub get --offline || true
-
-          echo "⚠️  Semua metode pub gagal, lanjut build dengan skip validation"
+          run_pub "flutter pub get"     flutter pub get && exit 0 || true
+          run_pub "flutter pub upgrade" flutter pub upgrade && exit 0 || true
+          run_pub "pub upgrade --major" flutter pub upgrade --major-versions && exit 0 || true
+          run_pub "pub get --offline"   flutter pub get --offline || true
+          echo "⚠️  Semua metode gagal, lanjut dengan skip validation"
 
       - name: "[ZIP] Sync Android SDK"
         if: steps.parse.outputs.mode == 'zip'
@@ -690,25 +625,16 @@ jobs:
         working-directory: ${{ steps.root_zip.outputs.dir }}
         run: |
           set -o pipefail
-
           OUTPUT="${{ steps.parse.outputs.output_type }}"
           BUILD="${{ steps.parse.outputs.build_type }}"
-
           echo "▶ flutter build $OUTPUT --$BUILD"
           flutter build "$OUTPUT" "--$BUILD" \
             --no-tree-shake-icons \
             --android-skip-build-dependency-validation 2>&1 | tee /tmp/build.log
-          BUILD_STATUS=${PIPESTATUS[0]}
-
-          if [ "$BUILD_STATUS" -ne 0 ]; then
-            echo ""
-            echo "════════════════════════════════════════════════════════"
-            echo "❌ BUILD GAGAL — 40 baris terakhir:"
-            echo "════════════════════════════════════════════════════════"
-            tail -40 /tmp/build.log
-            exit "$BUILD_STATUS"
+          STATUS=${PIPESTATUS[0]}
+          if [ "$STATUS" -ne 0 ]; then
+            echo ""; echo "❌ BUILD GAGAL — 40 baris terakhir:"; tail -40 /tmp/build.log; exit "$STATUS"
           fi
-
           echo "✅ Build sukses"
 
       - name: "[ZIP] Upload artifact"
@@ -729,20 +655,12 @@ jobs:
         if: steps.parse.outputs.mode == 'url'
         run: |
           set -euo pipefail
-
-          # project_name harus lowercase + underscore
           PROJ_NAME=$(echo "${{ steps.parse.outputs.app_name }}" \
-            | tr '[:upper:]' '[:lower:]' \
-            | tr -c 'a-z0-9' '_' \
-            | sed -E 's/_+/_/g; s/^_|_$//g' \
-            | cut -c1-30)
+            | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '_' \
+            | sed -E 's/_+/_/g; s/^_|_$//g' | cut -c1-30)
           [ -z "$PROJ_NAME" ] && PROJ_NAME="webview_app"
-
-          # org harus valid reverse-domain
           ORG="com.ci.$PROJ_NAME"
           ORG=$(echo "$ORG" | tr -c 'a-z0-9.' '.' | sed -E 's/\.+/./g; s/^\.|\.$//g')
-
-          echo "▶ flutter create --org $ORG --project-name $PROJ_NAME webview_project"
           flutter create --org "$ORG" --project-name "$PROJ_NAME" webview_project
           cd webview_project
           flutter pub add webview_flutter
@@ -750,10 +668,8 @@ jobs:
       - name: "[URL] Patch main.dart"
         if: steps.parse.outputs.mode == 'url'
         run: |
-          # Escape single-quote & newline di URL
           TARGET_URL=$(echo "${{ steps.parse.outputs.url }}" | sed "s/'/\\\\'/g")
           APP_TITLE=$(echo "${{ steps.parse.outputs.app_name }}" | sed "s/'/\\\\'/g")
-
           cat > webview_project/lib/main.dart << DART
           import 'package:flutter/material.dart';
           import 'package:webview_flutter/webview_flutter.dart';
@@ -762,7 +678,6 @@ jobs:
 
           class MyApp extends StatelessWidget {
             const MyApp({super.key});
-
             @override
             Widget build(BuildContext context) {
               return MaterialApp(
@@ -775,7 +690,6 @@ jobs:
 
           class WebViewPage extends StatefulWidget {
             const WebViewPage({super.key});
-
             @override
             State<WebViewPage> createState() => _WebViewPageState();
           }
@@ -783,7 +697,6 @@ jobs:
           class _WebViewPageState extends State<WebViewPage> {
             late final WebViewController _controller;
             bool _loading = true;
-
             @override
             void initState() {
               super.initState();
@@ -795,7 +708,6 @@ jobs:
                 ))
                 ..loadRequest(Uri.parse('${TARGET_URL}'));
             }
-
             @override
             Widget build(BuildContext context) {
               return Scaffold(
@@ -803,8 +715,7 @@ jobs:
                   child: Stack(
                     children: [
                       WebViewWidget(controller: _controller),
-                      if (_loading)
-                        const Center(child: CircularProgressIndicator()),
+                      if (_loading) const Center(child: CircularProgressIndicator()),
                     ],
                   ),
                 ),
@@ -820,9 +731,8 @@ jobs:
           APP="${{ steps.parse.outputs.app_name }}"
           APP_XML=$(echo "$APP" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
           MANIFEST="webview_project/android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST" ]; then
+          [ -f "$MANIFEST" ] && \
             sed -i "s|android:label=\"[^\"]*\"|android:label=\"${APP_XML}\"|" "$MANIFEST"
-          fi
 
       - name: "[URL] Apply custom icon"
         if: |
@@ -838,8 +748,7 @@ jobs:
       - name: "[URL] Pub get"
         if: steps.parse.outputs.mode == 'url'
         working-directory: webview_project
-        run: |
-          flutter pub get || flutter pub upgrade || true
+        run: flutter pub get || flutter pub upgrade || true
 
       - name: "[URL] Sync Android SDK"
         if: steps.parse.outputs.mode == 'url'
@@ -868,7 +777,7 @@ jobs:
           retention-days: 7
 
       # ═════════════════════════════════════════════════════════════════════
-      # 6. RINGKASAN
+      # 6. SUMMARY
       # ═════════════════════════════════════════════════════════════════════
       - name: Summary
         if: always()

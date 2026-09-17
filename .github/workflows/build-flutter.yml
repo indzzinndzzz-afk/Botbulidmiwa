@@ -95,19 +95,23 @@ jobs:
         run: |
           if [ -f "android/app/build.gradle.kts" ]; then
             echo "🔧 Fixing Kotlin DSL..."
-            
-            cat > android/build.gradle.kts << 'EOF'
-            buildscript {
-              repositories {
-                google()
-                mavenCentral()
-              }
-              dependencies {
-                classpath("com.android.tools.build:gradle:8.7.2")
-                classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.20")
-              }
-            }
 
+            # ── Ambil applicationId & namespace asli sebelum file ditimpa ──
+            ORIG_APP_ID=$(grep -oP '(?<=applicationId\s=\s")[^"]+' android/app/build.gradle.kts | head -1)
+            ORIG_NAMESPACE=$(grep -oP '(?<=namespace\s=\s")[^"]+' android/app/build.gradle.kts | head -1)
+
+            # Fallback ke AndroidManifest.xml kalau tidak ketemu di build.gradle.kts
+            if [ -z "$ORIG_APP_ID" ] && [ -f "android/app/src/main/AndroidManifest.xml" ]; then
+              ORIG_APP_ID=$(grep -oP '(?<=package=")[^"]+' android/app/src/main/AndroidManifest.xml | head -1)
+            fi
+
+            ORIG_APP_ID=${ORIG_APP_ID:-com.example.app}
+            ORIG_NAMESPACE=${ORIG_NAMESPACE:-$ORIG_APP_ID}
+
+            echo "📦 applicationId asli: $ORIG_APP_ID"
+            echo "📦 namespace asli: $ORIG_NAMESPACE"
+
+            cat > android/build.gradle.kts << 'EOF'
             allprojects {
               repositories {
                 google()
@@ -115,15 +119,15 @@ jobs:
               }
             }
 
-            rootProject.buildDir = "../build"
+            rootProject.buildDir = File("../build")
             subprojects {
-              project.buildDir = "${rootProject.buildDir}/${project.name}"
+              project.buildDir = File("${rootProject.buildDir}/${project.name}")
             }
             subprojects {
               project.evaluationDependsOn(":app")
             }
 
-            tasks.register("clean", Delete) {
+            tasks.register<Delete>("clean") {
               delete(rootProject.buildDir)
             }
           EOF
@@ -136,7 +140,7 @@ jobs:
             }
 
             android {
-              namespace = "com.example.app"
+              namespace = "__NAMESPACE__"
               compileSdk = 35
 
               compileOptions {
@@ -149,7 +153,7 @@ jobs:
               }
 
               defaultConfig {
-                applicationId = "com.example.app"
+                applicationId = "__APPLICATION_ID__"
                 minSdk = 21
                 targetSdk = 35
                 versionCode = 1
@@ -168,6 +172,10 @@ jobs:
               source = "../.."
             }
           EOF
+
+            # Suntikkan applicationId & namespace asli (heredoc di atas quoted, jadi aman disubstitusi belakangan)
+            sed -i "s/__NAMESPACE__/${ORIG_NAMESPACE}/" android/app/build.gradle.kts
+            sed -i "s/__APPLICATION_ID__/${ORIG_APP_ID}/" android/app/build.gradle.kts
 
             echo "✅ Kotlin DSL fixed"
           fi

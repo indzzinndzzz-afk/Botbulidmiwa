@@ -141,7 +141,7 @@ jobs:
 
             android {
               namespace = "__NAMESPACE__"
-              compileSdk = 35
+              compileSdk = 36
 
               compileOptions {
                 sourceCompatibility = JavaVersion.VERSION_17
@@ -155,7 +155,7 @@ jobs:
               defaultConfig {
                 applicationId = "__APPLICATION_ID__"
                 minSdk = 21
-                targetSdk = 35
+                targetSdk = 36
                 versionCode = 1
                 versionName = "1.0"
               }

@@ -233,12 +233,12 @@ jobs:
             echo "🔍 Base Flutter: $FLUTTER_BASE"
             echo "🔍 Base Dart major: $DART_MAJOR"
             
-            # ── 1. SDK constraint mengikuti Dart base ──────────────────
-            sed -i "s/sdk:.*/sdk: \">=${DART_MAJOR}.0.0 <$((DART_MAJOR+1)).0.0\"/g" "$PUBSPEC"
+            # ── 1. SDK constraint mengikuti Dart base (hanya baris environment, jangan sentuh "sdk: flutter") ──
+            sed -i "/sdk: *['\"]/s/sdk:.*/sdk: \">=${DART_MAJOR}.0.0 <$((DART_MAJOR+1)).0.0\"/" "$PUBSPEC"
             
-            # ── 2. Semua dependency jadi 'any' ──────────────────────────
-            sed -i 's/: \^[0-9.]\+/: any/g' "$PUBSPEC"
-            sed -i 's/: [0-9.]\+/: any/g' "$PUBSPEC"
+            # ── 2. Semua dependency jadi 'any' (hanya baris terindentasi, jangan sentuh top-level 'version:') ──
+            sed -i '/^[[:space:]]/s/: \^[0-9][0-9.]*$/: any/' "$PUBSPEC"
+            sed -i '/^[[:space:]]/s/: [0-9][0-9.]*$/: any/' "$PUBSPEC"
             
             # ── 3. Tambahkan dependency_overrides ──────────────────────
             if ! grep -q "^dependency_overrides:" "$PUBSPEC"; then

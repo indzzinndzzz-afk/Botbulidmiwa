@@ -300,6 +300,25 @@ jobs:
             echo "📋 SDK constraint: >=${DART_MAJOR}.0.0 <$((DART_MAJOR+1)).0.0"
           fi
 
+      # ── HAPUS LOCKFILE LAMA ──────────────────────────────────────────────
+      # PENTING: project yang di-upload user sering sudah bawa pubspec.lock
+      # lama. Kalau dibiarkan, `flutter pub get` TIDAK akan meng-upgrade
+      # versi yang sudah terkunci di situ selama masih "memenuhi" constraint
+      # di pubspec.yaml — walaupun constraint sudah kita ubah jadi 'any'.
+      # Ini yang bikin versi 'meta'/'collection' lama tetap kepakai dan
+      # bikin kompilasi framework Flutter gagal dengan error
+      # "@awaitNotRequired ... Not a constant expression", meskipun
+      # dependency_overrides sudah dibersihkan. Hapus lockfile-nya supaya
+      # semua di-resolve ulang dari nol mengikuti Flutter SDK di runner.
+      - name: "[ZIP] Hapus pubspec.lock lama"
+        if: steps.parse.outputs.mode == 'zip'
+        working-directory: ${{ steps.root_zip.outputs.dir }}
+        run: |
+          if [ -f "pubspec.lock" ]; then
+            rm -f pubspec.lock
+            echo "🗑️  pubspec.lock lama dihapus, dependency akan di-resolve ulang"
+          fi
+
       # ── PUB GET ──────────────────────────────────────────────────────────
       - name: "[ZIP] Pub get"
         if: steps.parse.outputs.mode == 'zip'

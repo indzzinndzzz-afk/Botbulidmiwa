@@ -23,9 +23,8 @@ jobs:
     timeout-minutes: 60
 
     env:
-      # ── Baseline long-term. Naikkan kalau Flutter SDK baru butuh lebih. ──
-      # Auto-bump di step Build akan naikkan otomatis kalau plugin minta SDK lebih tinggi.
-      MIN_ANDROID_SDK: "37"
+      # ── Baseline. Auto-bump akan naikkan otomatis kalau tersedia & dibutuhkan. ──
+      MIN_ANDROID_SDK: "36"
       GRADLE_VERSION: "8.14.1"
       AGP_VERSION: "8.7.2"
       KOTLIN_VERSION: "2.0.20"
@@ -124,10 +123,11 @@ jobs:
           #!/usr/bin/env bash
           set -uo pipefail
           PROJECT_DIR="${1:-.}"
-          MIN_SDK="${MIN_ANDROID_SDK:-37}"
+          MIN_SDK="${MIN_ANDROID_SDK:-36}"
           log() { echo "[$(date +%H:%M:%S)] $*"; }
           log "📂 Project: $PROJECT_DIR | MIN_SDK: $MIN_SDK"
 
+          # ── 1. Deteksi default compileSdk dari Flutter SDK ──────────
           FLUTTER_BIN=$(command -v flutter || true)
           FLUTTER_ROOT="${FLUTTER_ROOT:-}"
           if [ -z "$FLUTTER_ROOT" ] && [ -n "$FLUTTER_BIN" ]; then
@@ -140,6 +140,7 @@ jobs:
           fi
           log "🎛️  Flutter default compileSdk = ${FLUTTER_DEFAULT:-<unknown>}"
 
+          # ── 2. Scan literal compileSdk di app + plugin ──────────────
           ALL=$(mktemp); FOUND=$(mktemp)
           scan_file() {
             local f="$1" label="$2" vals
@@ -164,32 +165,74 @@ jobs:
           [ -z "$MAX" ] && MAX=$MIN_SDK
           log "🎯 Target compileSdk = $MAX"
 
+          # ── 3. Cek ketersediaan platform kalau >= 37 ────────────────
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          [ -x "$SDKMANAGER" ] || SDKMANAGER="$(find "$ANDROID_HOME" -name sdkmanager -type f 2>/dev/null | head -1)"
+          [ -x "$SDKMANAGER" ] || \
+            SDKMANAGER="$(find "$ANDROID_HOME" -name sdkmanager -type f 2>/dev/null | head -1)"
+
+          if [ "$MAX" -ge 37 ]; then
+            if [ ! -d "$ANDROID_HOME/platforms/android-$MAX" ]; then
+              log "🔍 platforms;android-$MAX belum ada. Cek ketersediaan di channel..."
+              AVAIL=""
+              for CHANNEL in "" "--channel=3" "--channel=2"; do
+                if "$SDKMANAGER" --sdk_root="$ANDROID_HOME" $CHANNEL --list 2>/dev/null \
+                   | grep -q "platforms;android-$MAX"; then
+                  AVAIL="yes"
+                  log "✅ Tersedia di channel '$CHANNEL'"
+                  break
+                fi
+              done
+
+              if [ -z "$AVAIL" ]; then
+                log "⚠️  platforms;android-$MAX TIDAK TERSEDIA di channel manapun"
+                MAX_AVAIL=$("$SDKMANAGER" --list 2>/dev/null \
+                              | grep -oP 'platforms;android-\K\d+' | sort -n | tail -1)
+                MAX_AVAIL=${MAX_AVAIL:-$MIN_SDK}
+                log "🔽 Fallback: max=$MAX → $MAX_AVAIL"
+                MAX="$MAX_AVAIL"
+              fi
+            fi
+          fi
+          log "🎯 Final compileSdk = $MAX"
+
+          # ── 4. Install platform kalau belum ada ──────────────────────
           if [ -d "$ANDROID_HOME/platforms/android-$MAX" ]; then
             log "✅ platforms;android-$MAX sudah ada"
           else
             log "📥 Install platforms;android-$MAX ..."
-            yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+            yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses >/dev/null 2>&1 || true
             INSTALLED=0
             for CHANNEL in "" "--channel=3" "--channel=2"; do
-              if "$SDKMANAGER" $CHANNEL "platforms;android-$MAX" >/tmp/sdkmgr.log 2>&1; then INSTALLED=1; break; fi
+              log "  → channel '$CHANNEL'"
+              if "$SDKMANAGER" --sdk_root="$ANDROID_HOME" $CHANNEL "platforms;android-$MAX" \
+                   >/tmp/sdkmgr.log 2>&1; then
+                INSTALLED=1
+                log "  ✅ Berhasil install platforms;android-$MAX"
+                break
+              fi
+              log "  ⚠️  Gagal: $(tail -1 /tmp/sdkmgr.log 2>/dev/null || echo 'no log')"
             done
+
             if [ "$INSTALLED" -eq 0 ]; then
-              log "⚠️  Gagal install platforms;android-$MAX — coba fallback ke $MIN_SDK"
+              log "❌ Tidak bisa install platforms;android-$MAX — fallback ke $MIN_SDK"
               MAX=$MIN_SDK
               if [ ! -d "$ANDROID_HOME/platforms/android-$MAX" ]; then
-                "$SDKMANAGER" "platforms;android-$MAX" >/dev/null 2>&1 || true
+                "$SDKMANAGER" --sdk_root="$ANDROID_HOME" "platforms;android-$MAX" >/dev/null 2>&1 || true
               fi
             fi
           fi
-          log "📦 Platforms:"; ls "$ANDROID_HOME/platforms" 2>/dev/null | sed 's/^/  - /'
+          log "📦 Platforms tersedia:"; ls "$ANDROID_HOME/platforms" 2>/dev/null | sed 's/^/  - /'
 
+          # ── 5. gradle.properties ─────────────────────────────────────
           GP="$PROJECT_DIR/android/gradle.properties"
           mkdir -p "$(dirname "$GP")"; touch "$GP"
           set_prop() {
             local k="$1" v="$2"
-            if grep -q "^${k}=" "$GP"; then sed -i -E "s|^${k}=.*|${k}=${v}|" "$GP"; else echo "${k}=${v}" >> "$GP"; fi
+            if grep -q "^${k}=" "$GP"; then
+              sed -i -E "s|^${k}=.*|${k}=${v}|" "$GP"
+            else
+              echo "${k}=${v}" >> "$GP"
+            fi
           }
           set_prop "flutter.compileSdkVersion" "$MAX"
           set_prop "flutter.targetSdkVersion" "$MAX"
@@ -198,17 +241,47 @@ jobs:
           set_prop "org.gradle.jvmargs" "-Xmx4g -XX:MaxMetaspaceSize=1g"
           log "📝 gradle.properties → flutter.compileSdkVersion=$MAX"
 
+          # ── 6. Patch plugin ──────────────────────────────────────────
           PATCHED=0
           for ROOT in "${CACHE_ROOTS[@]}"; do
             [ -d "$ROOT" ] || continue
             while IFS= read -r f; do
-              if sed -i -E -e "s/(compileSdkVersion\s*=?\s*)[0-9]+/\1$MAX/g" -e "s/(compileSdk\s*=?\s*)[0-9]+/\1$MAX/g" "$f" 2>/dev/null; then
+              if sed -i -E \
+                -e "s/(compileSdkVersion\s*=?\s*)[0-9]+/\1$MAX/g" \
+                -e "s/(compileSdk\s*=?\s*)[0-9]+/\1$MAX/g" \
+                "$f" 2>/dev/null; then
                 PATCHED=$((PATCHED+1))
               fi
-            done < <(find "$ROOT" -maxdepth 8 \( -name build.gradle -o -name build.gradle.kts \) -path '*/android/*' 2>/dev/null)
+            done < <(find "$ROOT" -maxdepth 8 \
+                        \( -name build.gradle -o -name build.gradle.kts \) \
+                        -path '*/android/*' 2>/dev/null)
           done
           log "✅ Plugin dipatch: $PATCHED file"
 
+          # ── 7. Patch khusus: permission_handler_android ──────────────
+          # Plugin ini kadang pakai constant API 37 (Manifest.permission.ACCESS_LOCAL_NETWORK)
+          # yang tidak ada di SDK 36. Ganti jadi string literal — nilainya sama.
+          PERM_DIR=$(find "$HOME/.pub-cache/hosted/pub.dev" -maxdepth 1 \
+                       -name "permission_handler_android-*" -type d 2>/dev/null | head -1)
+
+          if [ -n "$PERM_DIR" ]; then
+            log "🔧 Patch permission_handler_android → kompat SDK $MAX"
+            find "$PERM_DIR" -name "build.gradle*" -exec \
+              sed -i -E \
+                -e "s/(compileSdkVersion\s*=?\s*)[0-9]+/\1$MAX/g" \
+                -e "s/(compileSdk\s*=?\s*)[0-9]+/\1$MAX/g" \
+              {} \; 2>/dev/null || true
+
+            if [ "$MAX" -lt 37 ]; then
+              find "$PERM_DIR" \( -name "*.kt" -o -name "*.java" \) -exec \
+                sed -i \
+                  's/Manifest\.permission\.ACCESS_LOCAL_NETWORK/"android.permission.ACCESS_LOCAL_NETWORK"/g' \
+                {} \; 2>/dev/null || true
+              log "  ✅ ACCESS_LOCAL_NETWORK → string literal"
+            fi
+          fi
+
+          # ── 8. Patch app ─────────────────────────────────────────────
           [ -f "$PROJECT_DIR/android/app/build.gradle.kts" ] && \
             sed -i -E -e "s/(compileSdk\s*=\s*)[0-9]+/\1$MAX/g" -e "s/(targetSdk\s*=\s*)[0-9]+/\1$MAX/g" \
               "$PROJECT_DIR/android/app/build.gradle.kts"
@@ -318,7 +391,7 @@ jobs:
           for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
             echo ""
             echo "════════════════════════════════════════════════════════════"
-            echo "▶️  BUILD ATTEMPT $attempt/$MAX_ATTEMPTS (MIN_ANDROID_SDK=${MIN_ANDROID_SDK:-37})"
+            echo "▶️  BUILD ATTEMPT $attempt/$MAX_ATTEMPTS (MIN_ANDROID_SDK=${MIN_ANDROID_SDK:-36})"
             echo "════════════════════════════════════════════════════════════"
 
             set +e
@@ -341,26 +414,44 @@ jobs:
             NEEDED_SDK=""
             NEEDED_SDK=$(grep -oiP 'requires Android SDK version \K\d+' /tmp/build.log | head -1 || true)
             [ -z "$NEEDED_SDK" ] && NEEDED_SDK=$(grep -oiP 'requires (?:compileSdk|SDK)(?: version)? \K\d+' /tmp/build.log | head -1 || true)
-            [ -z "$NEEDED_SDK" ] && NEEDED_SDK=$(grep -oiP 'platforms;android-\K\d+' /tmp/build.log | head -1 || true)
             [ -z "$NEEDED_SDK" ] && NEEDED_SDK=$(grep -oiP 'Failed to find Platform SDK with path: platforms;android-\K\d+' /tmp/build.log | head -1 || true)
 
-            # ── Tidak ada indikasi SDK → bukan masalah SDK ───────────
             if [ -z "$NEEDED_SDK" ]; then
               echo ""
               echo "⚠️  Tidak bisa deteksi versi SDK dari log."
-              echo "📋 Kemungkinan error bukan SDK (Dart / kode user / manifest)."
               bash /tmp/ci/report-errors.sh /tmp/build.log
               exit "$STATUS"
             fi
 
             echo ""
             echo "🔍 Error minta Android SDK $NEEDED_SDK"
-            echo "🔧 Auto-bump: MIN_ANDROID_SDK=${MIN_ANDROID_SDK:-37} → $NEEDED_SDK"
+            CURRENT="${MIN_ANDROID_SDK:-36}"
 
-            CURRENT="${MIN_ANDROID_SDK:-37}"
+            # ── Cek ketersediaan platform yang diminta ───────────────
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+            [ -x "$SDKMANAGER" ] || \
+              SDKMANAGER="$(find "$ANDROID_HOME" -name sdkmanager -type f 2>/dev/null | head -1)"
+
+            AVAIL=""
+            for CHANNEL in "" "--channel=3" "--channel=2"; do
+              if "$SDKMANAGER" --sdk_root="$ANDROID_HOME" $CHANNEL --list 2>/dev/null \
+                 | grep -q "platforms;android-$NEEDED_SDK"; then
+                AVAIL="yes"
+                break
+              fi
+            done
+
+            if [ -z "$AVAIL" ]; then
+              echo "⚠️  platforms;android-$NEEDED_SDK TIDAK TERSEDIA di channel manapun."
+              echo "📋 Kemungkinan plugin butuh SDK yang belum rilis untuk publik."
+              echo "🔧 Sudah di-patch di sync-android-sdk.sh — tapi masih gagal."
+              echo ""
+              bash /tmp/ci/report-errors.sh /tmp/build.log
+              exit "$STATUS"
+            fi
+
             if [ "$NEEDED_SDK" -le "$CURRENT" ]; then
               echo "⚠️  Sudah MIN_SDK=$CURRENT tapi masih minta $NEEDED_SDK."
-              echo "📋 Kemungkinan error bukan murni SDK."
               bash /tmp/ci/report-errors.sh /tmp/build.log
               exit "$STATUS"
             fi
@@ -371,13 +462,12 @@ jobs:
               exit "$STATUS"
             fi
 
-            # ── Update env & sync ulang SDK ──────────────────────────
             export MIN_ANDROID_SDK="$NEEDED_SDK"
             if [ -n "${GITHUB_ENV:-}" ]; then
               echo "MIN_ANDROID_SDK=$NEEDED_SDK" >> "$GITHUB_ENV"
             fi
             echo ""
-            echo "📥 Install & sinkron ulang SDK ke versi $NEEDED_SDK..."
+            echo "📥 Sync ulang SDK ke versi $NEEDED_SDK..."
             bash /tmp/ci/sync-android-sdk.sh "$PROJECT"
           done
 
